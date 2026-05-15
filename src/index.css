@@ -1,0 +1,43 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    /* Transparent background for frameless electron window */
+    background-color: transparent !important;
+    overflow: hidden;
+    color: #fff;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  }
+}
+
+@layer utilities {
+  .drag-region {
+    -webkit-app-region: drag;
+  }
+  .no-drag-region {
+    -webkit-app-region: no-drag;
+  }
+  .glass-panel {
+    @apply bg-jarvis-panel backdrop-blur-md border border-jarvis-blue/20 shadow-[0_0_15px_rgba(0,240,255,0.1)];
+  }
+  .text-glow {
+    text-shadow: 0 0 10px rgba(0, 240, 255, 0.7);
+  }
+}
+
+/* Custom Scrollbar for inner components if needed */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 240, 255, 0.3);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 240, 255, 0.6);
+}
