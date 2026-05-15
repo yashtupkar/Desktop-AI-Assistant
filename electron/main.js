@@ -5,6 +5,7 @@ const { exec } = require("child_process");
 const fs = require("fs");
 const os = require("os");
 const { EdgeTTS } = require("node-edge-tts");
+const { TextDecoder } = require("util");
 app.commandLine.appendSwitch("enable-speech-dispatcher");
 app.commandLine.appendSwitch("disable-features", "AudioServiceOutOfProcess");
 app.commandLine.appendSwitch(
@@ -160,6 +161,70 @@ ipcMain.handle("ollama-chat", async (event, messages, model = "llama3.2") => {
     return { success: false, error: error.message };
   }
 });
+
+ipcMain.on(
+  "ollama-chat-stream",
+  async (event, messages, model = "llama3.2") => {
+    try {
+      const response = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: model,
+          messages: messages,
+          stream: true,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        event.reply("ollama-chat-stream-error", errorText);
+        return;
+      }
+
+      let buffer = "";
+      let doneSent = false;
+      response.body.on("data", (chunk) => {
+        buffer += chunk.toString();
+        const lines = buffer.split("\n");
+
+        for (let i = 0; i < lines.length - 1; i++) {
+          const line = lines[i].trim();
+          if (!line) continue;
+
+          try {
+            const data = JSON.parse(line);
+            if (data.message && data.message.content) {
+              event.reply("ollama-chat-stream-chunk", data.message.content);
+            }
+            if (data.done && !doneSent) {
+              doneSent = true;
+              event.reply("ollama-chat-stream-done");
+            }
+          } catch (e) {
+            console.error("Error parsing Ollama stream chunk:", e);
+          }
+        }
+
+        buffer = lines[lines.length - 1] || "";
+      });
+
+      response.body.on("end", () => {
+        if (!doneSent) {
+          event.reply("ollama-chat-stream-done");
+        }
+      });
+
+      response.body.on("error", (error) => {
+        console.error("Ollama stream error:", error);
+        event.reply("ollama-chat-stream-error", error.message);
+      });
+    } catch (error) {
+      console.error("Ollama chat stream error:", error);
+      event.reply("ollama-chat-stream-error", error.message);
+    }
+  },
+);
 
 ipcMain.handle("edge-tts", async (event, text) => {
   console.log("Edge TTS called with text:", text);

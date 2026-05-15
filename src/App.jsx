@@ -222,6 +222,7 @@ export default function App() {
         { role: "assistant", content: responseText },
       ]);
       speak(responseText);
+      setIsProcessing(false);
     } else {
       if (ollamaStatus.online) {
         try {
@@ -231,25 +232,42 @@ export default function App() {
             { role: "user", content: userText },
           ];
 
-          const response = await window.electronAPI.ollamaChat(
-            ollamaMessages,
-            ollamaModel,
-          );
+          let fullResponse = "";
+          let assistantMessageId = Date.now();
 
-          if (response.success) {
-            setMessages((prev) => [
-              ...prev,
-              { role: "assistant", content: response.message },
-            ]);
-            speak(response.message);
-          } else {
-            const fallbackMsg = "Sorry, I encountered an error.";
-            setMessages((prev) => [
-              ...prev,
-              { role: "assistant", content: fallbackMsg },
-            ]);
-            speak(fallbackMsg);
-          }
+          setMessages((prev) => [
+            ...prev,
+            { role: "assistant", content: "", id: assistantMessageId },
+          ]);
+
+          window.electronAPI.ollamaChatStream(ollamaMessages, ollamaModel, {
+            onChunk: (chunk) => {
+              fullResponse += chunk;
+              setMessages((prev) =>
+                prev.map((msg) =>
+                  msg.id === assistantMessageId
+                    ? { ...msg, content: fullResponse }
+                    : msg,
+                ),
+              );
+            },
+            onDone: () => {
+              setIsProcessing(false);
+              if (fullResponse.trim()) {
+                speak(fullResponse);
+              }
+            },
+            onError: (error) => {
+              console.error("Ollama stream error:", error);
+              const fallbackMsg = "Sorry, I encountered an error.";
+              setMessages((prev) => [
+                ...prev,
+                { role: "assistant", content: fallbackMsg },
+              ]);
+              speak(fallbackMsg);
+              setIsProcessing(false);
+            },
+          });
         } catch (error) {
           console.error("Ollama error:", error);
           const fallbackMsg = "Sorry, I encountered an error.";
@@ -258,6 +276,7 @@ export default function App() {
             { role: "assistant", content: fallbackMsg },
           ]);
           speak(fallbackMsg);
+          setIsProcessing(false);
         }
       } else {
         const fallbackMsg =
@@ -267,10 +286,9 @@ export default function App() {
           { role: "assistant", content: fallbackMsg },
         ]);
         speak(fallbackMsg);
+        setIsProcessing(false);
       }
     }
-
-    setIsProcessing(false);
   };
 
   const handleCommandSubmit = async (e) => {
