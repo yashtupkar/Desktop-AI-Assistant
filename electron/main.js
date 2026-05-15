@@ -254,3 +254,252 @@ ipcMain.handle("edge-tts", async (event, text) => {
     return { success: false, error: error.message };
   }
 });
+
+const { randomBytes } = require("crypto");
+const WebSocket = require("ws");
+const { HttpsProxyAgent } = require("https-proxy-agent");
+const { TRUSTED_CLIENT_TOKEN, generateSecMsGecToken, CHROMIUM_FULL_VERSION } = require("node-edge-tts/dist/drm");
+
+function escapeXml(unsafe) {
+  return unsafe.replace(/[<>&"']/g, (c) => {
+    switch (c) {
+      case "<":
+        return "&lt;";
+      case ">":
+        return "&gt;";
+      case "&":
+        return "&amp;";
+      case '"':
+        return "&quot;";
+      case "'":
+        return "&apos;";
+      default:
+        return c;
+    }
+  });
+}
+
+ipcMain.on("edge-tts-stream", async (event, text) => {
+  console.log("Edge TTS stream called with text:", text);
+  try {
+    const ws = new WebSocket(
+      `wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=${TRUSTED_CLIENT_TOKEN}&Sec-MS-GEC=${generateSecMsGecToken()}&Sec-MS-GEC-Version=1-${CHROMIUM_FULL_VERSION}`,
+      {
+        host: "speech.platform.bing.com",
+        origin: "chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold",
+        headers: {
+          Pragma: "no-cache",
+          "Cache-Control": "no-cache",
+          "User-Agent": `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${CHROMIUM_FULL_VERSION.split(".")[0]}.0.0.0 Safari/537.36 Edg/${CHROMIUM_FULL_VERSION.split(".")[0]}.0.0.0`,
+          "Accept-Encoding": "gzip, deflate, br, zstd",
+          "Accept-Language": "en-US,en;q=0.9",
+        },
+      },
+    );
+
+    ws.on("open", () => {
+      ws.send(`Content-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n
+        {
+          "context": {
+            "synthesis": {
+              "audio": {
+                "metadataoptions": {
+                  "sentenceBoundaryEnabled": "false",
+                  "wordBoundaryEnabled": "false"
+                },
+                "outputFormat": "audio-24khz-48kbitrate-mono-mp3"
+              }
+            }
+          }
+        }
+      `);
+
+      const requestId = randomBytes(16).toString("hex");
+      ws.send(`X-RequestId:${requestId}\r\nContent-Type:application/ssml+xml\r\nPath:ssml\r\n\r\n
+        <speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xmlns:mstts="https://www.w3.org/2001/mstts" xml:lang="en-US">
+          <voice name="en-US-AriaNeural">
+            <prosody rate="default" pitch="default" volume="default">
+              ${escapeXml(text)}
+            </prosody>
+          </voice>
+        </speak>`);
+    });
+
+    ws.on("message", (data, isBinary) => {
+      if (isBinary) {
+        const separator = "Path:audio\r\n";
+        const index = data.indexOf(separator) + separator.length;
+        const audioData = data.subarray(index);
+        event.reply("edge-tts-stream-chunk", audioData.toString("base64"));
+      } else {
+        const message = data.toString();
+        if (message.includes("Path:turn.end")) {
+          event.reply("edge-tts-stream-done");
+          ws.close();
+        }
+      }
+    });
+
+    ws.on("error", (error) => {
+      console.error("Edge TTS stream error:", error);
+      event.reply("edge-tts-stream-error", error.message);
+      ws.close();
+    });
+  } catch (error) {
+    console.error("Edge TTS stream error:", error);
+    event.reply("edge-tts-stream-error", error.message);
+  }
+});
+
+let browserInstance = null;
+let pageInstance = null;
+
+ipcMain.handle("browser-start", async () => {
+  try {
+    if (!browserInstance) {
+      const puppeteerModule = await import("puppeteer");
+      const puppeteer = puppeteerModule.default || puppeteerModule;
+      browserInstance = await puppeteer.launch({
+        headless: false,
+        defaultViewport: null,
+      });
+      const pages = await browserInstance.pages();
+      pageInstance = pages[0];
+    }
+    return { success: true };
+  } catch (error) {
+    console.error("Browser start error:", error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("browser-goto", async (event, url) => {
+  try {
+    if (!pageInstance) throw new Error("Browser not started");
+    await pageInstance.goto(url, { waitUntil: "networkidle2" });
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("browser-get-dom", async () => {
+  try {
+    if (!pageInstance) throw new Error("Browser not started");
+    
+    // Inject script to label interactive elements
+    const domInfo = await pageInstance.evaluate(() => {
+      let elements = document.querySelectorAll("a, button, input, select, textarea, [role='button'], [tabindex]");
+      let interactiveElements = [];
+      
+      // Clean up previous overlays
+      document.querySelectorAll(".jarvis-overlay-label").forEach(o => o.remove());
+
+      elements.forEach((el, index) => {
+        // Skip hidden elements
+        const style = window.getComputedStyle(el);
+        if (style.display === "none" || style.visibility === "hidden" || el.offsetWidth === 0) return;
+        
+        el.setAttribute("data-jarvis-id", index);
+        
+        let label = el.innerText || el.value || el.placeholder || el.getAttribute("aria-label") || el.alt || "";
+        label = label.toString().trim().replace(/\n/g, " ").substring(0, 100);
+        
+        if (label || el.tagName.toLowerCase() === "input") {
+          interactiveElements.push({
+            id: index,
+            tag: el.tagName.toLowerCase(),
+            type: el.type || undefined,
+            label: label,
+          });
+          
+          let overlay = document.createElement("div");
+          overlay.className = "jarvis-overlay-label";
+          overlay.style.position = "absolute";
+          let rect = el.getBoundingClientRect();
+          overlay.style.top = (rect.top + window.scrollY) + "px";
+          overlay.style.left = (rect.left + window.scrollX) + "px";
+          overlay.style.backgroundColor = "rgba(255, 0, 0, 0.8)";
+          overlay.style.color = "white";
+          overlay.style.fontSize = "12px";
+          overlay.style.fontWeight = "bold";
+          overlay.style.padding = "2px 4px";
+          overlay.style.borderRadius = "3px";
+          overlay.style.zIndex = "999999";
+          overlay.style.pointerEvents = "none";
+          overlay.innerText = index;
+          document.body.appendChild(overlay);
+        }
+      });
+      
+      return {
+        url: window.location.href,
+        title: document.title,
+        elements: interactiveElements
+      };
+    });
+    
+    return { success: true, dom: domInfo };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("browser-click", async (event, id) => {
+  try {
+    if (!pageInstance) throw new Error("Browser not started");
+    await pageInstance.evaluate((elId) => {
+      const el = document.querySelector(`[data-jarvis-id="${elId}"]`);
+      if (el) el.click();
+    }, id);
+    // Wait a bit for navigation or JS to run
+    await new Promise(r => setTimeout(r, 2000));
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("browser-type", async (event, id, text) => {
+  try {
+    if (!pageInstance) throw new Error("Browser not started");
+    
+    await pageInstance.evaluate((elId) => {
+      const el = document.querySelector(`[data-jarvis-id="${elId}"]`);
+      if (el) {
+        el.focus();
+        el.value = ''; 
+      }
+    }, id);
+    
+    await pageInstance.type(`[data-jarvis-id="${id}"]`, text, { delay: 50 });
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("browser-keyboard", async (event, key) => {
+  try {
+     if (!pageInstance) throw new Error("Browser not started");
+     await pageInstance.keyboard.press(key);
+     await new Promise(r => setTimeout(r, 2000));
+     return { success: true };
+  } catch(error) {
+     return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle("browser-close", async () => {
+  try {
+    if (browserInstance) {
+      await browserInstance.close();
+      browserInstance = null;
+      pageInstance = null;
+    }
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+

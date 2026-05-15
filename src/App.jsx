@@ -31,18 +31,10 @@ RESPONSE RULES:
 - Never say "I'm just an AI" or "As an AI language model"
 - Never use bullet points unless specifically asked for a list
 - Speak in a natural, conversational tone
-- If you don't know something, say "I don't have that information, Sir" — don't make things up
-- For greetings, respond warmly but briefly
-
-EXAMPLES:
-User: "What time is it?"
-You: "I don't have direct clock access, Sir, but your system clock should have that covered."
-
-User: "How are you?"  
-You: "Running at full capacity, Sir. How can I assist you today?"
-
-User: "Tell me about black holes"
-You: "Black holes are regions where gravity is so intense that nothing — not even light — can escape. They form when massive stars collapse. Quite fascinating, Sir — shall I go deeper?"`;
+- If you don't know something, say "I don't have that information, Sir"
+- If the user asks you to automate a browser task (e.g. "buy a laptop", "search amazon", "open browser and do x"), you MUST respond EXACTLY with:
+<BROWSER_TASK>The task they want to accomplish</BROWSER_TASK>
+Do NOT include any other text when returning <BROWSER_TASK>.`;
 
 export default function App() {
   const [isMinimized, setIsMinimized] = useState(false);
@@ -57,11 +49,70 @@ export default function App() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [messages, setMessages] = useState([]);
   const [ollamaModel, setOllamaModel] = useState("llama3.2");
-
+const speakQueueRef = useRef([]);
+const isSpeakingRef = useRef(false);
+const audioContextRef = useRef(null);
   const transcriberRef = useRef(null);
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
   const messagesEndRef = useRef(null);
+
+  const processSpeakQueue = async () => {
+    if (isSpeakingRef.current || speakQueueRef.current.length === 0) return;
+    isSpeakingRef.current = true;
+
+    const sentence = speakQueueRef.current.shift();
+
+    await new Promise((resolve) => {
+      window.electronAPI.edgeTTSStream(sentence, {
+        onChunk: (base64Chunk) => {
+          // Decode and queue audio chunk
+          const binary = atob(base64Chunk);
+          const bytes = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i++) {
+            bytes[i] = binary.charCodeAt(i);
+          }
+          // Accumulate chunks
+          if (!window._ttsChunks) window._ttsChunks = [];
+          window._ttsChunks.push(bytes);
+        },
+        onDone: () => {
+          // All chunks received — concat and play
+          const chunks = window._ttsChunks || [];
+          window._ttsChunks = [];
+
+          const totalLength = chunks.reduce((acc, c) => acc + c.length, 0);
+          const merged = new Uint8Array(totalLength);
+          let offset = 0;
+          for (const chunk of chunks) {
+            merged.set(chunk, offset);
+            offset += chunk.length;
+          }
+
+          const blob = new Blob([merged], { type: "audio/mp3" });
+          const url = URL.createObjectURL(blob);
+          const audio = new Audio(url);
+          audio.onended = () => {
+            URL.revokeObjectURL(url);
+            isSpeakingRef.current = false;
+            processSpeakQueue(); // play next sentence
+          };
+          audio.onerror = () => {
+            isSpeakingRef.current = false;
+            processSpeakQueue();
+          };
+          audio.play();
+          resolve();
+        },
+        onError: (err) => {
+          console.error("TTS stream error:", err);
+          isSpeakingRef.current = false;
+          processSpeakQueue();
+          resolve();
+        },
+      });
+    });
+  };
 
   useEffect(() => {
     const interval = setInterval(async () => {
@@ -129,57 +180,7 @@ export default function App() {
       .replace(/[.,!?]/g, "")
       .trim();
 
-    if (lowerText.includes("youtube")) {
-      const hasSearchTerm = !lowerText.match(/^(open|start|launch) youtube$/);
-      let query = "";
-
-      if (hasSearchTerm) {
-        query = lowerText
-          .replace("play", "")
-          .replace("on youtube", "")
-          .replace("in youtube", "")
-          .replace("youtube", "")
-          .replace("search for", "")
-          .replace("search", "")
-          .trim();
-      }
-
-      if (window.electronAPI?.openUrl) {
-        if (query) {
-          await window.electronAPI.openUrl(
-            `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`,
-          );
-        } else {
-          await window.electronAPI.openUrl("https://www.youtube.com");
-        }
-      }
-      return { type: "youtube", query: query };
-    } else if (lowerText.includes("search") || lowerText.includes("google")) {
-      const hasSearchTerm = !lowerText.match(
-        /^(open|start|launch) (google|chrome)$/,
-      );
-      let query = "";
-
-      if (hasSearchTerm) {
-        query = lowerText
-          .replace("search for", "")
-          .replace("search", "")
-          .replace("on google", "")
-          .replace("google", "")
-          .trim();
-      }
-
-      if (window.electronAPI?.openUrl) {
-        if (query) {
-          await window.electronAPI.openUrl(
-            `https://www.google.com/search?q=${encodeURIComponent(query)}`,
-          );
-        } else {
-          await window.electronAPI.openUrl("https://www.google.com");
-        }
-      }
-      return { type: "search", query: query };
-    } else if (lowerText.includes("open ")) {
+    if (lowerText.includes("open ")) {
       const appName = lowerText.split("open ")[1]?.trim();
       if (appName && window.electronAPI?.openApp) {
         const res = await window.electronAPI.openApp(appName);
@@ -192,6 +193,86 @@ export default function App() {
     return null;
   };
 
+  const runBrowserAgent = async (taskDescription) => {
+    setMessages((prev) => [...prev, { role: "assistant", content: "Starting browser automation protocol..." }]);
+    speak("Starting browser automation protocol.");
+    
+    await window.electronAPI.browserStart();
+    
+    let loopCount = 0;
+    let isDone = false;
+    let currentTask = taskDescription;
+    
+    while (loopCount < 10 && !isDone) {
+       loopCount++;
+       const domRes = await window.electronAPI.browserGetDom();
+       if (!domRes.success) {
+          setMessages((prev) => [...prev, { role: "assistant", content: "Failed to read browser DOM." }]);
+          break;
+       }
+       
+       const prompt = `You are a browser automation agent.
+Task: ${currentTask}
+Current URL: ${domRes.dom.url}
+Page Title: ${domRes.dom.title}
+Interactive Elements:
+${domRes.dom.elements.map(e => `[${e.id}] ${e.tag} ${e.type ? `(${e.type})` : ''} - ${e.label}`).join('\n')}
+
+Decide the next action to take. Reply strictly with ONE JSON object. No markdown, no extra text.
+Actions:
+{"action": "goto", "url": "https://..."}
+{"action": "click", "id": <element_id>}
+{"action": "type", "id": <element_id>, "text": "..."}
+{"action": "keyboard", "key": "Enter"}
+{"action": "done", "message": "Result of the task"}
+`;
+       
+       setMessages((prev) => [...prev, { role: "assistant", content: `Analyzing page (${loopCount}/10)...` }]);
+       
+       const res = await window.electronAPI.ollamaChat([{role: "user", content: prompt}], ollamaModel);
+       if (!res.success) {
+           setMessages((prev) => [...prev, { role: "assistant", content: "Agent encountered an error with LLM." }]);
+           break;
+       }
+       
+       let response = res.message;
+       
+       try {
+         const jsonMatch = response.match(/\{[\s\S]*\}/);
+         if (!jsonMatch) throw new Error("No JSON found");
+         const action = JSON.parse(jsonMatch[0]);
+         
+         if (action.action === "goto") {
+            setMessages((prev) => [...prev, { role: "assistant", content: `Navigating to ${action.url}` }]);
+            await window.electronAPI.browserGoto(action.url);
+         } else if (action.action === "click") {
+            setMessages((prev) => [...prev, { role: "assistant", content: `Clicking element [${action.id}]` }]);
+            await window.electronAPI.browserClick(action.id);
+         } else if (action.action === "type") {
+            setMessages((prev) => [...prev, { role: "assistant", content: `Typing into element [${action.id}]` }]);
+            await window.electronAPI.browserType(action.id, action.text);
+         } else if (action.action === "keyboard") {
+            setMessages((prev) => [...prev, { role: "assistant", content: `Pressing key: ${action.key}` }]);
+            await window.electronAPI.browserKeyboard(action.key);
+         } else if (action.action === "done") {
+            setMessages((prev) => [...prev, { role: "assistant", content: "Task complete: " + action.message }]);
+            speak("Task complete: " + action.message);
+            isDone = true;
+         }
+       } catch(e) {
+         console.error("Action parsing error:", e, "Response:", response);
+         setMessages((prev) => [...prev, { role: "assistant", content: `Failed to parse action. Trying again.` }]);
+         currentTask += " (Last action failed, try something else)";
+       }
+    }
+    
+    if (!isDone) {
+      setMessages((prev) => [...prev, { role: "assistant", content: "Automation stopped (max loops reached or error)." }]);
+      speak("Automation stopped due to timeout or error.");
+    }
+    await window.electronAPI.browserClose();
+  };
+
   const processMessage = async (userText) => {
     setIsProcessing(true);
 
@@ -201,15 +282,7 @@ export default function App() {
 
     if (cmdResult) {
       let responseText = "";
-      if (cmdResult.type === "youtube") {
-        responseText = cmdResult.query
-          ? `Searching for "${cmdResult.query}" on YouTube`
-          : "Opening YouTube";
-      } else if (cmdResult.type === "search") {
-        responseText = cmdResult.query
-          ? `Searching for "${cmdResult.query}"`
-          : "Opening Google";
-      } else if (cmdResult.type === "app") {
+      if (cmdResult.type === "app") {
         if (cmdResult.success) {
           responseText = `Opening ${cmdResult.app}`;
         } else {
@@ -251,9 +324,20 @@ export default function App() {
                 ),
               );
             },
-            onDone: () => {
+            onDone: async () => {
               setIsProcessing(false);
-              if (fullResponse.trim()) {
+              const match = fullResponse.match(/<BROWSER_TASK>(.*?)<\/BROWSER_TASK>/s);
+              if (match) {
+                const task = match[1].trim();
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.id === assistantMessageId
+                      ? { ...msg, content: `Understood, Sir. Initializing browser for task: ${task}` }
+                      : msg,
+                  ),
+                );
+                await runBrowserAgent(task);
+              } else if (fullResponse.trim()) {
                 speak(fullResponse);
               }
             },

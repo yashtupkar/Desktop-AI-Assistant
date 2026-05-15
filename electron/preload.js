@@ -36,4 +36,38 @@ contextBridge.exposeInMainWorld("electronAPI", {
   },
   checkOllama: () => ipcRenderer.invoke("check-ollama"),
   edgeTTS: (text) => ipcRenderer.invoke("edge-tts", text),
+  edgeTTSStream: (text, callbacks) => {
+    const { onChunk, onDone, onError } = callbacks;
+
+    ipcRenderer.send("edge-tts-stream", text);
+
+    const chunkHandler = (event, base64Chunk) => onChunk(base64Chunk);
+    const doneHandler = () => {
+      onDone();
+      cleanup();
+    };
+    const errorHandler = (event, error) => {
+      onError(error);
+      cleanup();
+    };
+
+    ipcRenderer.on("edge-tts-stream-chunk", chunkHandler);
+    ipcRenderer.on("edge-tts-stream-done", doneHandler);
+    ipcRenderer.on("edge-tts-stream-error", errorHandler);
+
+    const cleanup = () => {
+      ipcRenderer.removeListener("edge-tts-stream-chunk", chunkHandler);
+      ipcRenderer.removeListener("edge-tts-stream-done", doneHandler);
+      ipcRenderer.removeListener("edge-tts-stream-error", errorHandler);
+    };
+
+    return cleanup;
+  },
+  browserStart: () => ipcRenderer.invoke("browser-start"),
+  browserGoto: (url) => ipcRenderer.invoke("browser-goto", url),
+  browserGetDom: () => ipcRenderer.invoke("browser-get-dom"),
+  browserClick: (id) => ipcRenderer.invoke("browser-click", id),
+  browserType: (id, text) => ipcRenderer.invoke("browser-type", id, text),
+  browserKeyboard: (key) => ipcRenderer.invoke("browser-keyboard", key),
+  browserClose: () => ipcRenderer.invoke("browser-close"),
 });
