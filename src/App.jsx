@@ -32,9 +32,22 @@ RESPONSE RULES:
 - Never use bullet points unless specifically asked for a list
 - Speak in a natural, conversational tone
 - If you don't know something, say "I don't have that information, Sir"
-- If the user asks you to automate a browser task (e.g. "buy a laptop", "search amazon", "open browser and do x"), you MUST respond EXACTLY with:
-<BROWSER_TASK>The task they want to accomplish</BROWSER_TASK>
-Do NOT include any other text when returning <BROWSER_TASK>.`;
+If the user explicitly asks to:
+- browse websites
+- search online
+- fill forms
+- purchase items
+- apply for jobs
+- automate websites
+
+THEN return ONLY:
+
+<BROWSER_TASK>
+task here
+</BROWSER_TASK>
+
+Do not include any other text.
+`;
 
 export default function App() {
   const [isMinimized, setIsMinimized] = useState(false);
@@ -42,16 +55,16 @@ export default function App() {
   const [systemStats, setSystemStats] = useState({ cpu: 0, ram: 0 });
   const [isListening, setIsListening] = useState(false);
   const [isModelLoading, setIsModelLoading] = useState(false);
-  const [ollamaStatus, setOllamaStatus] = useState({
+  const [aiStatus, setAiStatus] = useState({
     online: false,
     models: [],
   });
   const [isProcessing, setIsProcessing] = useState(false);
   const [messages, setMessages] = useState([]);
-  const [ollamaModel, setOllamaModel] = useState("llama3.2");
-const speakQueueRef = useRef([]);
-const isSpeakingRef = useRef(false);
-const audioContextRef = useRef(null);
+  const [aiModel, setAiModel] = useState("google/gemini-2.5-flash-lite");
+  const speakQueueRef = useRef([]);
+  const isSpeakingRef = useRef(false);
+  const audioContextRef = useRef(null);
   const transcriberRef = useRef(null);
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
@@ -130,31 +143,27 @@ const audioContextRef = useRef(null);
   }, []);
 
   useEffect(() => {
-    const checkOllama = async () => {
-      if (window.electronAPI && window.electronAPI.checkOllama) {
-        const status = await window.electronAPI.checkOllama();
-        setOllamaStatus(status);
-        if (status.models.length > 0) {
-          setOllamaModel(status.models[0].name);
+    const checkAI = async () => {
+      if (window.electronAPI && window.electronAPI.checkAIStatus) {
+        const status = await window.electronAPI.checkAIStatus();
+        setAiStatus(status);
+        if (status.models && status.models.length > 0) {
+          // If the default model is not in the list, we might want to pick the first one
+          // but for OpenRouter we usually want to stick to a known free model if possible
+          // setAiModel(status.models[0].id); 
         }
       }
     };
-    checkOllama();
-    const interval = setInterval(checkOllama, 30000);
+    checkAI();
+    const interval = setInterval(checkAI, 30000);
     return () => clearInterval(interval);
   }, []);
 
   const speak = async (text) => {
-    console.log("Speak called with text:", text);
-    console.log("electronAPI:", window.electronAPI);
-    console.log("edgeTTS available:", !!window.electronAPI?.edgeTTS);
     try {
       if (window.electronAPI?.edgeTTS) {
-        console.log("Calling edgeTTS...");
         const result = await window.electronAPI.edgeTTS(text);
-        console.log("edgeTTS result:", result);
         if (result.success) {
-          console.log("Playing audio...");
           const audio = new Audio(`data:audio/mp3;base64,${result.audio}`);
           audio.play();
         }
@@ -194,82 +203,332 @@ const audioContextRef = useRef(null);
   };
 
   const runBrowserAgent = async (taskDescription) => {
-    setMessages((prev) => [...prev, { role: "assistant", content: "Starting browser automation protocol..." }]);
-    speak("Starting browser automation protocol.");
-    
+
+    setMessages(prev => [
+      ...prev,
+      {
+        role: "assistant",
+        content: "Initializing browser agent..."
+      }
+    ]);
+
+    speak("Initializing browser agent.");
+
     await window.electronAPI.browserStart();
-    
+
     let loopCount = 0;
     let isDone = false;
-    let currentTask = taskDescription;
-    
-    while (loopCount < 10 && !isDone) {
-       loopCount++;
-       const domRes = await window.electronAPI.browserGetDom();
-       if (!domRes.success) {
-          setMessages((prev) => [...prev, { role: "assistant", content: "Failed to read browser DOM." }]);
-          break;
-       }
-       
-       const prompt = `You are a browser automation agent.
-Task: ${currentTask}
-Current URL: ${domRes.dom.url}
-Page Title: ${domRes.dom.title}
-Interactive Elements:
-${domRes.dom.elements.map(e => `[${e.id}] ${e.tag} ${e.type ? `(${e.type})` : ''} - ${e.label}`).join('\n')}
 
-Decide the next action to take. Reply strictly with ONE JSON object. No markdown, no extra text.
-Actions:
-{"action": "goto", "url": "https://..."}
-{"action": "click", "id": <element_id>}
-{"action": "type", "id": <element_id>, "text": "..."}
-{"action": "keyboard", "key": "Enter"}
-{"action": "done", "message": "Result of the task"}
+    let actionHistory = [];
+    let lastAction = null;
+    let repeatedActions = 0;
+
+    let lastDomSignature = "";
+    let unchangedDomCount = 0;
+
+    const MAX_LOOPS = 15;
+
+    while (!isDone && loopCount < MAX_LOOPS) {
+
+      loopCount++;
+
+      // OBSERVE
+      const domRes = await window.electronAPI.browserGetDom();
+
+      if (!domRes.success) {
+        break;
+      }
+
+      const elements = domRes.dom.elements || [];
+
+      // CLEAN ELEMENTS
+      const simplifiedElements = elements
+        .filter(e => e.label || e.text)
+        .slice(0, 60)
+        .map(e => ({
+          id: e.id,
+          tag: e.tag,
+          type: e.type || "",
+          label: e.label || e.text || ""
+        }));
+
+      // DOM SIGNATURE
+      const domSignature = JSON.stringify(
+        simplifiedElements.map(e => e.label)
+      );
+
+      if (domSignature === lastDomSignature) {
+        unchangedDomCount++;
+      } else {
+        unchangedDomCount = 0;
+      }
+
+      lastDomSignature = domSignature;
+
+      // STOP IF PAGE STUCK
+      if (unchangedDomCount >= 4) {
+
+        setMessages(prev => [
+          ...prev,
+          {
+            role: "assistant",
+            content: "Page appears unchanged. Stopping automation."
+          }
+        ]);
+
+        break;
+      }
+
+      // PROMPT
+      const prompt = `
+You are an autonomous browser agent.
+
+TASK:
+${taskDescription}
+
+CURRENT PAGE:
+URL: ${domRes.dom.url}
+TITLE: ${domRes.dom.title}
+
+ELEMENTS:
+${simplifiedElements.map(e =>
+        `[${e.id}] <${e.tag}> ${e.type} "${e.label}"`
+      ).join("\n")}
+
+PREVIOUS ACTIONS:
+${actionHistory.join("\n") || "None"}
+
+RULES:
+- Return ONLY valid JSON
+- Never explain
+- Never repeat failed actions
+- If task appears completed use:
+{"action":"done","message":"..."}
+
+AVAILABLE ACTIONS:
+
+{"action":"goto","url":"https://..."}
+
+{"action":"click","id":123}
+
+{"action":"type","id":123,"text":"..."}
+
+{"action":"keyboard","key":"Enter"}
+
+{"action":"wait"}
+
+{"action":"done","message":"Task completed"}
+
+Choose the BEST next action.
 `;
-       
-       setMessages((prev) => [...prev, { role: "assistant", content: `Analyzing page (${loopCount}/10)...` }]);
-       
-       const res = await window.electronAPI.ollamaChat([{role: "user", content: prompt}], ollamaModel);
-       if (!res.success) {
-           setMessages((prev) => [...prev, { role: "assistant", content: "Agent encountered an error with LLM." }]);
-           break;
-       }
-       
-       let response = res.message;
-       
-       try {
-         const jsonMatch = response.match(/\{[\s\S]*\}/);
-         if (!jsonMatch) throw new Error("No JSON found");
-         const action = JSON.parse(jsonMatch[0]);
-         
-         if (action.action === "goto") {
-            setMessages((prev) => [...prev, { role: "assistant", content: `Navigating to ${action.url}` }]);
-            await window.electronAPI.browserGoto(action.url);
-         } else if (action.action === "click") {
-            setMessages((prev) => [...prev, { role: "assistant", content: `Clicking element [${action.id}]` }]);
-            await window.electronAPI.browserClick(action.id);
-         } else if (action.action === "type") {
-            setMessages((prev) => [...prev, { role: "assistant", content: `Typing into element [${action.id}]` }]);
-            await window.electronAPI.browserType(action.id, action.text);
-         } else if (action.action === "keyboard") {
-            setMessages((prev) => [...prev, { role: "assistant", content: `Pressing key: ${action.key}` }]);
-            await window.electronAPI.browserKeyboard(action.key);
-         } else if (action.action === "done") {
-            setMessages((prev) => [...prev, { role: "assistant", content: "Task complete: " + action.message }]);
-            speak("Task complete: " + action.message);
-            isDone = true;
-         }
-       } catch(e) {
-         console.error("Action parsing error:", e, "Response:", response);
-         setMessages((prev) => [...prev, { role: "assistant", content: `Failed to parse action. Trying again.` }]);
-         currentTask += " (Last action failed, try something else)";
-       }
+
+      setMessages(prev => [
+        ...prev,
+        {
+          role: "assistant",
+          content: `Agent thinking (${loopCount}/${MAX_LOOPS})`
+        }
+      ]);
+
+      // AI CALL
+      const res = await window.electronAPI.aiChat(
+        [
+          {
+            role: "user",
+            content: prompt
+          }
+        ],
+        aiModel
+      );
+
+      if (!res.success) {
+        break;
+      }
+
+      let action;
+
+      try {
+
+        const cleaned = res.message.trim();
+
+        action = JSON.parse(cleaned);
+
+      } catch (err) {
+
+        console.error("JSON parse error:", err);
+
+        setMessages(prev => [
+          ...prev,
+          {
+            role: "assistant",
+            content: "Invalid AI response format."
+          }
+        ]);
+
+        continue;
+      }
+
+      // VALIDATION
+      const allowedActions = [
+        "goto",
+        "click",
+        "type",
+        "keyboard",
+        "wait",
+        "done"
+      ];
+
+      if (!allowedActions.includes(action.action)) {
+
+        setMessages(prev => [
+          ...prev,
+          {
+            role: "assistant",
+            content: "AI returned invalid action."
+          }
+        ]);
+
+        continue;
+      }
+
+      // ANTI LOOP
+      if (
+        JSON.stringify(action) === JSON.stringify(lastAction)
+      ) {
+        repeatedActions++;
+      } else {
+        repeatedActions = 0;
+      }
+
+      lastAction = action;
+
+      if (repeatedActions >= 3) {
+
+        setMessages(prev => [
+          ...prev,
+          {
+            role: "assistant",
+            content: "Agent appears stuck repeating actions."
+          }
+        ]);
+
+        break;
+      }
+
+      // SAVE HISTORY
+      actionHistory.push(JSON.stringify(action));
+
+      // EXECUTE
+      try {
+
+        if (action.action === "goto") {
+
+          setMessages(prev => [
+            ...prev,
+            {
+              role: "assistant",
+              content: `Navigating to ${action.url}`
+            }
+          ]);
+
+          await window.electronAPI.browserGoto(action.url);
+
+        } else if (action.action === "click") {
+
+          setMessages(prev => [
+            ...prev,
+            {
+              role: "assistant",
+              content: `Clicking element ${action.id}`
+            }
+          ]);
+
+          await window.electronAPI.browserClick(action.id);
+
+        } else if (action.action === "type") {
+
+          setMessages(prev => [
+            ...prev,
+            {
+              role: "assistant",
+              content: `Typing "${action.text}"`
+            }
+          ]);
+
+          await window.electronAPI.browserType(
+            action.id,
+            action.text
+          );
+
+        } else if (action.action === "keyboard") {
+
+          setMessages(prev => [
+            ...prev,
+            {
+              role: "assistant",
+              content: `Pressing ${action.key}`
+            }
+          ]);
+
+          await window.electronAPI.browserKeyboard(action.key);
+
+        } else if (action.action === "wait") {
+
+          setMessages(prev => [
+            ...prev,
+            {
+              role: "assistant",
+              content: "Waiting..."
+            }
+          ]);
+
+          await new Promise(r => setTimeout(r, 2000));
+
+        } else if (action.action === "done") {
+
+          setMessages(prev => [
+            ...prev,
+            {
+              role: "assistant",
+              content: action.message
+            }
+          ]);
+
+          speak(action.message);
+
+          isDone = true;
+        }
+
+        // WAIT FOR PAGE
+        await new Promise(r => setTimeout(r, 1500));
+
+      } catch (execError) {
+
+        console.error(execError);
+
+        setMessages(prev => [
+          ...prev,
+          {
+            role: "assistant",
+            content: "Execution failed."
+          }
+        ]);
+      }
     }
-    
+
     if (!isDone) {
-      setMessages((prev) => [...prev, { role: "assistant", content: "Automation stopped (max loops reached or error)." }]);
-      speak("Automation stopped due to timeout or error.");
+
+      setMessages(prev => [
+        ...prev,
+        {
+          role: "assistant",
+          content: "Automation stopped."
+        }
+      ]);
+
+      speak("Automation stopped.");
     }
+
     await window.electronAPI.browserClose();
   };
 
@@ -297,9 +556,9 @@ Actions:
       speak(responseText);
       setIsProcessing(false);
     } else {
-      if (ollamaStatus.online) {
+      if (aiStatus.online) {
         try {
-          const ollamaMessages = [
+          const aiMessages = [
             { role: "system", content: SYSTEM_PROMPT },
             ...messages,
             { role: "user", content: userText },
@@ -313,7 +572,7 @@ Actions:
             { role: "assistant", content: "", id: assistantMessageId },
           ]);
 
-          window.electronAPI.ollamaChatStream(ollamaMessages, ollamaModel, {
+          window.electronAPI.aiChatStream(aiMessages, aiModel, {
             onChunk: (chunk) => {
               fullResponse += chunk;
               setMessages((prev) =>
@@ -342,7 +601,7 @@ Actions:
               }
             },
             onError: (error) => {
-              console.error("Ollama stream error:", error);
+              console.error("AI stream error:", error);
               const fallbackMsg = "Sorry, I encountered an error.";
               setMessages((prev) => [
                 ...prev,
@@ -353,7 +612,7 @@ Actions:
             },
           });
         } catch (error) {
-          console.error("Ollama error:", error);
+          console.error("AI error:", error);
           const fallbackMsg = "Sorry, I encountered an error.";
           setMessages((prev) => [
             ...prev,
@@ -364,7 +623,7 @@ Actions:
         }
       } else {
         const fallbackMsg =
-          "Ollama is not running. Please start Ollama to use AI features.";
+          "OpenRouter API is disconnected or key is missing. Please check your configuration.";
         setMessages((prev) => [
           ...prev,
           { role: "assistant", content: fallbackMsg },
@@ -679,16 +938,15 @@ Actions:
               </h3>
               <div className="glass-panel p-4 rounded-lg text-xs text-jarvis-blue/60 leading-relaxed font-mono">
                 Status:{" "}
-                {ollamaStatus.online ? (
+                {aiStatus.online ? (
                   <span className="text-green-400">ONLINE</span>
                 ) : (
                   <span className="text-red-400">OFFLINE</span>
                 )}
                 <br />
-                Model: {ollamaModel}
+                Provider: OpenRouter
                 <br />
-                Models:{" "}
-                {ollamaStatus.models.map((m) => m.name).join(", ") || "None"}
+                Model: {aiModel.split("/").pop()}
               </div>
             </div>
           </div>

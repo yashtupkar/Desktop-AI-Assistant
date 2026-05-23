@@ -5,12 +5,12 @@ contextBridge.exposeInMainWorld("electronAPI", {
   getSystemStats: () => ipcRenderer.invoke("get-system-stats"),
   openUrl: (url) => ipcRenderer.invoke("open-url", url),
   openApp: (appName) => ipcRenderer.invoke("open-app", appName),
-  ollamaChat: (messages, model) =>
-    ipcRenderer.invoke("ollama-chat", messages, model),
-  ollamaChatStream: (messages, model, callbacks) => {
+  aiChat: (messages, model) =>
+    ipcRenderer.invoke("ai-chat", messages, model),
+  aiChatStream: (messages, model, callbacks) => {
     const { onChunk, onDone, onError } = callbacks;
 
-    ipcRenderer.send("ollama-chat-stream", messages, model);
+    ipcRenderer.send("ai-chat-stream", messages, model);
 
     const chunkHandler = (event, content) => onChunk(content);
     const doneHandler = () => {
@@ -22,19 +22,19 @@ contextBridge.exposeInMainWorld("electronAPI", {
       cleanup();
     };
 
-    ipcRenderer.on("ollama-chat-stream-chunk", chunkHandler);
-    ipcRenderer.on("ollama-chat-stream-done", doneHandler);
-    ipcRenderer.on("ollama-chat-stream-error", errorHandler);
+    ipcRenderer.on("ai-chat-stream-chunk", chunkHandler);
+    ipcRenderer.on("ai-chat-stream-done", doneHandler);
+    ipcRenderer.on("ai-chat-stream-error", errorHandler);
 
     const cleanup = () => {
-      ipcRenderer.removeListener("ollama-chat-stream-chunk", chunkHandler);
-      ipcRenderer.removeListener("ollama-chat-stream-done", doneHandler);
-      ipcRenderer.removeListener("ollama-chat-stream-error", errorHandler);
+      ipcRenderer.removeListener("ai-chat-stream-chunk", chunkHandler);
+      ipcRenderer.removeListener("ai-chat-stream-done", doneHandler);
+      ipcRenderer.removeListener("ai-chat-stream-error", errorHandler);
     };
 
     return cleanup;
   },
-  checkOllama: () => ipcRenderer.invoke("check-ollama"),
+  checkAIStatus: () => ipcRenderer.invoke("check-ai-status"),
   edgeTTS: (text) => ipcRenderer.invoke("edge-tts", text),
   edgeTTSStream: (text, callbacks) => {
     const { onChunk, onDone, onError } = callbacks;
@@ -70,4 +70,5 @@ contextBridge.exposeInMainWorld("electronAPI", {
   browserType: (id, text) => ipcRenderer.invoke("browser-type", id, text),
   browserKeyboard: (key) => ipcRenderer.invoke("browser-keyboard", key),
   browserClose: () => ipcRenderer.invoke("browser-close"),
+  runAutomation: (task, args) => ipcRenderer.invoke("run-automation", task, args),
 });

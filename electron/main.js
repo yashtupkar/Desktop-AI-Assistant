@@ -12,9 +12,9 @@ app.commandLine.appendSwitch(
   "enable-features",
   "WebSpeechAPI,AudioServiceAudioStreams",
 );
-app.commandLine.appendSwitch("no-sandbox");
 
-const OLLAMA_BASE_URL = "http://localhost:11434";
+const OPENROUTER_URL = "https://openrouter.ai/api/v1";
+const OPENROUTER_API_KEY = "REMOVED_SEE_ENV_FILE"; // Replace with your actual key
 
 let mainWindow;
 
@@ -122,12 +122,16 @@ ipcMain.handle("get-system-stats", async () => {
   };
 });
 
-ipcMain.handle("check-ollama", async () => {
+ipcMain.handle("check-ai-status", async () => {
   try {
-    const response = await fetch(`${OLLAMA_BASE_URL}/api/tags`);
+    const response = await fetch(`${OPENROUTER_URL}/models`, {
+      headers: {
+        "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
+      },
+    });
     if (response.ok) {
       const data = await response.json();
-      return { online: true, models: data.models || [] };
+      return { online: true, models: data.data || [] };
     }
     return { online: false, models: [] };
   } catch (error) {
@@ -135,40 +139,50 @@ ipcMain.handle("check-ollama", async () => {
   }
 });
 
-ipcMain.handle("ollama-chat", async (event, messages, model = "llama3.2") => {
+ipcMain.handle("ai-chat", async (event, messages, model = "google/gemini-2.5-flash-lite") => {
   try {
-    const response = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
+    const response = await fetch(`${OPENROUTER_URL}/chat/completions`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
+        "HTTP-Referer": "https://github.com/yashtupkar/Desktop-AI-Assistant",
+        "X-Title": "Nova AI Assistant",
+      },
       body: JSON.stringify({
         model: model,
         messages: messages,
-        stream: false,
       }),
     });
 
     if (!response.ok) {
       const errorText = await response.text();
+      console.error(`OpenRouter API Error: ${response.status} - ${errorText}`);
       throw new Error(
-        `Ollama request failed: ${response.status} - ${errorText}`,
+        `OpenRouter request failed: ${response.status} - ${errorText}`,
       );
     }
 
     const data = await response.json();
-    return { success: true, message: data.message.content };
+    return { success: true, message: data.choices[0].message.content };
   } catch (error) {
-    console.error("Ollama chat error:", error);
+    console.error("AI chat error:", error);
     return { success: false, error: error.message };
   }
 });
 
 ipcMain.on(
-  "ollama-chat-stream",
-  async (event, messages, model = "llama3.2") => {
+  "ai-chat-stream",
+  async (event, messages, model = "google/gemma-2-9b-it:free") => {
     try {
-      const response = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
+      const response = await fetch(`${OPENROUTER_URL}/chat/completions`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
+          "HTTP-Referer": "https://github.com/yashtupkar/Desktop-AI-Assistant",
+          "X-Title": "Nova AI Assistant",
+        },
         body: JSON.stringify({
           model: model,
           messages: messages,
@@ -178,31 +192,33 @@ ipcMain.on(
 
       if (!response.ok) {
         const errorText = await response.text();
-        event.reply("ollama-chat-stream-error", errorText);
+        console.error(`OpenRouter Stream API Error: ${response.status} - ${errorText}`);
+        event.reply("ai-chat-stream-error", errorText);
         return;
       }
 
       let buffer = "";
-      let doneSent = false;
       response.body.on("data", (chunk) => {
         buffer += chunk.toString();
         const lines = buffer.split("\n");
 
         for (let i = 0; i < lines.length - 1; i++) {
           const line = lines[i].trim();
-          if (!line) continue;
+          if (!line || !line.startsWith("data: ")) continue;
+
+          const dataStr = line.replace("data: ", "");
+          if (dataStr === "[DONE]") {
+            event.reply("ai-chat-stream-done");
+            continue;
+          }
 
           try {
-            const data = JSON.parse(line);
-            if (data.message && data.message.content) {
-              event.reply("ollama-chat-stream-chunk", data.message.content);
-            }
-            if (data.done && !doneSent) {
-              doneSent = true;
-              event.reply("ollama-chat-stream-done");
+            const data = JSON.parse(dataStr);
+            if (data.choices && data.choices[0].delta && data.choices[0].delta.content) {
+              event.reply("ai-chat-stream-chunk", data.choices[0].delta.content);
             }
           } catch (e) {
-            console.error("Error parsing Ollama stream chunk:", e);
+            console.error("Error parsing AI stream chunk:", e);
           }
         }
 
@@ -210,41 +226,34 @@ ipcMain.on(
       });
 
       response.body.on("end", () => {
-        if (!doneSent) {
-          event.reply("ollama-chat-stream-done");
-        }
+        event.reply("ai-chat-stream-done");
       });
 
       response.body.on("error", (error) => {
-        console.error("Ollama stream error:", error);
-        event.reply("ollama-chat-stream-error", error.message);
+        console.error("AI stream error:", error);
+        event.reply("ai-chat-stream-error", error.message);
       });
     } catch (error) {
-      console.error("Ollama chat stream error:", error);
-      event.reply("ollama-chat-stream-error", error.message);
+      console.error("AI chat stream error:", error);
+      event.reply("ai-chat-stream-error", error.message);
     }
   },
 );
 
 ipcMain.handle("edge-tts", async (event, text) => {
-  console.log("Edge TTS called with text:", text);
   try {
     const tempDir = os.tmpdir();
     const outputFile = path.join(tempDir, `tts-${Date.now()}.mp3`);
-    console.log("Output file:", outputFile);
 
     const tts = new EdgeTTS({
       voice: "en-US-AriaNeural",
       lang: "en-US",
     });
 
-    console.log("Generating audio...");
     await tts.ttsPromise(text, outputFile);
-    console.log("Audio generated!");
 
     const audioBuffer = fs.readFileSync(outputFile);
     const base64Audio = audioBuffer.toString("base64");
-    console.log("Base64 length:", base64Audio.length);
 
     fs.unlinkSync(outputFile);
 
@@ -280,7 +289,6 @@ function escapeXml(unsafe) {
 }
 
 ipcMain.on("edge-tts-stream", async (event, text) => {
-  console.log("Edge TTS stream called with text:", text);
   try {
     const ws = new WebSocket(
       `wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=${TRUSTED_CLIENT_TOKEN}&Sec-MS-GEC=${generateSecMsGecToken()}&Sec-MS-GEC-Version=1-${CHROMIUM_FULL_VERSION}`,
@@ -354,22 +362,137 @@ ipcMain.on("edge-tts-stream", async (event, text) => {
 let browserInstance = null;
 let pageInstance = null;
 
+// Utility function to wait for Chrome debugging port to be ready
+async function waitForPortReady(port = 9222, maxAttempts = 60, delayMs = 500, initialDelayMs = 2000) {
+  // Give Chrome initial time to start and enable debugging port
+  console.log(`[Browser] Giving Chrome ${initialDelayMs}ms to initialize...`);
+  await new Promise((r) => setTimeout(r, initialDelayMs));
+  
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/json/version`);
+      if (response.ok) {
+        console.log(`[Browser] Debugging port ${port} is ready (attempt ${attempt})`);
+        return true;
+      }
+    } catch (error) {
+      // Port not ready yet, continue polling
+      if (attempt === maxAttempts) {
+        console.error(`[Browser] Port ${port} never became available after ${maxAttempts} attempts (${maxAttempts * delayMs}ms)`);
+        throw new Error(`Chrome debugging port ${port} never responded. Chrome may have failed to start or port 9222 is in use by another process.`);
+      }
+      // Wait before next attempt
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+  return false;
+}
+
 ipcMain.handle("browser-start", async () => {
   try {
     if (!browserInstance) {
-      const puppeteerModule = await import("puppeteer");
-      const puppeteer = puppeteerModule.default || puppeteerModule;
-      browserInstance = await puppeteer.launch({
-        headless: false,
+      const puppeteerModule = await import("puppeteer-core");
+      const puppeteer = puppeteerModule.default;
+
+      const fs = require("fs");
+      const path = require("path");
+      const os = require("os");
+      const { exec } = require("child_process");
+
+      // Detect Chrome automatically
+      const possibleChromePaths = [
+        "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+        "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+      ];
+
+      const chromePath = possibleChromePaths.find((p) =>
+        fs.existsSync(p)
+      );
+
+      if (!chromePath) {
+        throw new Error("Chrome not found at any standard location");
+      }
+
+      console.log(`[Browser] Found Chrome at: ${chromePath}`);
+
+      // Use a dedicated automation profile inside the Electron app data folder.
+      // This avoids direct reuse of the user's main Chrome profile.
+      const userDataDir = path.join(app.getPath("userData"), "chrome-automation-profile");
+      if (!fs.existsSync(userDataDir)) {
+        fs.mkdirSync(userDataDir, { recursive: true });
+      }
+
+      // Launch Chrome with debugging using spawn for better process control
+      const { spawn } = require("child_process");
+      console.log(`[Browser] Launching Chrome with remote debugging on port 9222...`);
+      console.log(`[Browser] Command: "${chromePath}" --remote-debugging-port=9222 --user-data-dir="${userDataDir}"`);
+      
+      const chromeProcess = spawn(chromePath, [
+        "--remote-debugging-port=9222",
+        `--user-data-dir=${userDataDir}`,
+        "--no-first-run",
+        "--no-default-browser-check"
+      ], {
+        detached: true,
+        stdio: "ignore"
+      });
+
+      let chromeExited = false;
+      chromeProcess.on("error", (error) => {
+        chromeExited = true;
+        console.error(`[Browser] Chrome spawn failed: ${error.message}`);
+      });
+
+      chromeProcess.on("exit", (code) => {
+        if (!chromeExited) {
+          chromeExited = true;
+          console.error(`[Browser] Chrome process exited with code ${code}`);
+        }
+      });
+
+      // Unref to allow process to run independently
+      chromeProcess.unref();
+
+      // Wait for Chrome debugging port to be ready
+      console.log(`[Browser] Waiting for debugging port 9222 to be available...`);
+      try {
+        await waitForPortReady(9222, 60, 500, 2000);
+      } catch (error) {
+        if (chromeExited) {
+          throw new Error("Chrome process failed to start or exited immediately. Check if Chrome is properly installed.");
+        }
+        throw error;
+      }
+
+      // Connect Puppeteer
+      console.log(`[Browser] Connecting Puppeteer to Chrome...`);
+      browserInstance = await puppeteer.connect({
+        browserURL: "http://127.0.0.1:9222",
         defaultViewport: null,
       });
+      console.log(`[Browser] Puppeteer connected successfully`);
+
       const pages = await browserInstance.pages();
-      pageInstance = pages[0];
+
+      pageInstance = pages[0] || await browserInstance.newPage();
     }
+
     return { success: true };
   } catch (error) {
-    console.error("Browser start error:", error);
-    return { success: false, error: error.message };
+    console.error(`[Browser] Start failed: ${error.message}`, error);
+    // Improve error message for common failures
+    let userFriendlyError = error.message;
+    if (error.message.includes("Chrome not found")) {
+      userFriendlyError = "Chrome browser not found. Please install Google Chrome.";
+    } else if (error.message.includes("never became available")) {
+      userFriendlyError = "Chrome started but debugging port didn't respond. Try closing existing Chrome windows and try again.";
+    } else if (error.message.includes("ECONNREFUSED")) {
+      userFriendlyError = "Unable to connect to Chrome debugging port. Ensure no other Chrome instances are using port 9222.";
+    }
+    return {
+      success: false,
+      error: userFriendlyError,
+    };
   }
 });
 
@@ -385,63 +508,69 @@ ipcMain.handle("browser-goto", async (event, url) => {
 
 ipcMain.handle("browser-get-dom", async () => {
   try {
-    if (!pageInstance) throw new Error("Browser not started");
-    
-    // Inject script to label interactive elements
+    if (!pageInstance) {
+      throw new Error("Browser not started");
+    }
+
     const domInfo = await pageInstance.evaluate(() => {
-      let elements = document.querySelectorAll("a, button, input, select, textarea, [role='button'], [tabindex]");
-      let interactiveElements = [];
-      
-      // Clean up previous overlays
-      document.querySelectorAll(".jarvis-overlay-label").forEach(o => o.remove());
+      const elements = document.querySelectorAll(
+        "a, button, input, select, textarea, [role='button'], [tabindex]"
+      );
+
+      const interactiveElements = [];
 
       elements.forEach((el, index) => {
-        // Skip hidden elements
         const style = window.getComputedStyle(el);
-        if (style.display === "none" || style.visibility === "hidden" || el.offsetWidth === 0) return;
-        
-        el.setAttribute("data-jarvis-id", index);
-        
-        let label = el.innerText || el.value || el.placeholder || el.getAttribute("aria-label") || el.alt || "";
-        label = label.toString().trim().replace(/\n/g, " ").substring(0, 100);
-        
-        if (label || el.tagName.toLowerCase() === "input") {
-          interactiveElements.push({
-            id: index,
-            tag: el.tagName.toLowerCase(),
-            type: el.type || undefined,
-            label: label,
-          });
-          
-          let overlay = document.createElement("div");
-          overlay.className = "jarvis-overlay-label";
-          overlay.style.position = "absolute";
-          let rect = el.getBoundingClientRect();
-          overlay.style.top = (rect.top + window.scrollY) + "px";
-          overlay.style.left = (rect.left + window.scrollX) + "px";
-          overlay.style.backgroundColor = "rgba(255, 0, 0, 0.8)";
-          overlay.style.color = "white";
-          overlay.style.fontSize = "12px";
-          overlay.style.fontWeight = "bold";
-          overlay.style.padding = "2px 4px";
-          overlay.style.borderRadius = "3px";
-          overlay.style.zIndex = "999999";
-          overlay.style.pointerEvents = "none";
-          overlay.innerText = index;
-          document.body.appendChild(overlay);
+
+        if (
+          style.display === "none" ||
+          style.visibility === "hidden" ||
+          el.offsetWidth === 0
+        ) {
+          return;
         }
+
+        // Invisible ID for automation
+        el.setAttribute("data-jarvis-id", index);
+
+        let label =
+          el.innerText ||
+          el.value ||
+          el.placeholder ||
+          el.getAttribute("aria-label") ||
+          el.alt ||
+          "";
+
+        label = label
+          .toString()
+          .trim()
+          .replace(/\n/g, " ")
+          .substring(0, 100);
+
+        interactiveElements.push({
+          id: index,
+          tag: el.tagName.toLowerCase(),
+          type: el.type || "",
+          label,
+        });
       });
-      
+
       return {
         url: window.location.href,
         title: document.title,
-        elements: interactiveElements
+        elements: interactiveElements,
       };
     });
-    
-    return { success: true, dom: domInfo };
+
+    return {
+      success: true,
+      dom: domInfo,
+    };
   } catch (error) {
-    return { success: false, error: error.message };
+    return {
+      success: false,
+      error: error.message,
+    };
   }
 });
 
@@ -463,15 +592,15 @@ ipcMain.handle("browser-click", async (event, id) => {
 ipcMain.handle("browser-type", async (event, id, text) => {
   try {
     if (!pageInstance) throw new Error("Browser not started");
-    
+
     await pageInstance.evaluate((elId) => {
       const el = document.querySelector(`[data-jarvis-id="${elId}"]`);
       if (el) {
         el.focus();
-        el.value = ''; 
+        el.value = '';
       }
     }, id);
-    
+
     await pageInstance.type(`[data-jarvis-id="${id}"]`, text, { delay: 50 });
     return { success: true };
   } catch (error) {
@@ -481,25 +610,105 @@ ipcMain.handle("browser-type", async (event, id, text) => {
 
 ipcMain.handle("browser-keyboard", async (event, key) => {
   try {
-     if (!pageInstance) throw new Error("Browser not started");
-     await pageInstance.keyboard.press(key);
-     await new Promise(r => setTimeout(r, 2000));
-     return { success: true };
-  } catch(error) {
-     return { success: false, error: error.message };
+    if (!pageInstance) throw new Error("Browser not started");
+    await pageInstance.keyboard.press(key);
+    await new Promise(r => setTimeout(r, 2000));
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Generic automation runner for simple test tasks
+ipcMain.handle("run-automation", async (event, task, args = []) => {
+  try {
+    if (!pageInstance) throw new Error("Browser not started");
+    switch (task) {
+      case "youtube_search_and_play": {
+        const query = args[0] || "";
+        await pageInstance.goto("https://www.youtube.com", { waitUntil: "networkidle2" });
+        await pageInstance.waitForTimeout(1000);
+        await pageInstance.evaluate((q) => {
+          const s = document.querySelector('input#search');
+          if (s) { s.value = q; s.dispatchEvent(new Event('input', { bubbles: true })); }
+        }, query);
+        await pageInstance.keyboard.press("Enter");
+        await pageInstance.waitForSelector("ytd-video-renderer", { timeout: 10000 });
+        await pageInstance.waitForTimeout(1000);
+        const title = await pageInstance.evaluate(() => {
+          const el = document.querySelector('ytd-video-renderer a#video-title');
+          return el ? el.textContent.trim() : null;
+        });
+        return { success: true, result: title };
+      }
+      case "google_search": {
+        const q = args[0] || "";
+        await pageInstance.goto(`https://www.google.com/search?q=${encodeURIComponent(q)}`, { waitUntil: "networkidle2" });
+        const snippet = await pageInstance.evaluate(() => {
+          const el = document.querySelector('div.g') || document.querySelector('div[jsname="Z0LcW"]');
+          return el ? el.innerText.trim().slice(0, 1000) : "";
+        });
+        return { success: true, result: snippet };
+      }
+      case "get_weather": {
+        const city = args[0] || "";
+        const q = `weather ${city}`;
+        await pageInstance.goto(`https://www.google.com/search?q=${encodeURIComponent(q)}`, { waitUntil: "networkidle2" });
+        const weather = await pageInstance.evaluate(() => {
+          const el = document.querySelector('#wob_tm') || document.querySelector('.wob_t');
+          const cond = document.querySelector('#wob_dc') || document.querySelector('.wob_dcp');
+          return { temp: el ? el.innerText : null, condition: cond ? cond.innerText : null };
+        });
+        return { success: true, result: weather };
+      }
+      case "get_latest_news": {
+        const q = args[0] || "";
+        await pageInstance.goto(`https://news.google.com/search?q=${encodeURIComponent(q)}`, { waitUntil: "networkidle2" });
+        const headlines = await pageInstance.evaluate(() => {
+          return Array.from(document.querySelectorAll('article h3')).slice(0,5).map(n => n.innerText.trim());
+        });
+        return { success: true, result: headlines };
+      }
+      case "amazon_search": {
+        const q = args[0] || "";
+        await pageInstance.goto(`https://www.amazon.in/s?k=${encodeURIComponent(q)}`, { waitUntil: "networkidle2" });
+        const items = await pageInstance.evaluate(() => {
+          return Array.from(document.querySelectorAll('div[data-component-type="s-search-result"] h2 a')).slice(0,5).map(a => a.innerText.trim());
+        });
+        return { success: true, result: items };
+      }
+      case "maps_directions": {
+        const from = args[0] || "";
+        const to = args[1] || "";
+        const mode = args[2] || "driving";
+        const url = `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(from)}&destination=${encodeURIComponent(to)}&travelmode=${encodeURIComponent(mode)}`;
+        await pageInstance.goto(url, { waitUntil: "networkidle2" });
+        return { success: true, result: url };
+      }
+      case "custom_task": {
+        const script = args[0] || "";
+        const res = await pageInstance.evaluate(new Function(`return (async () => { ${script} })()`));
+        return { success: true, result: res };
+      }
+      default:
+        return { success: false, error: "Unknown task" };
+    }
+  } catch (err) {
+    return { success: false, error: err.message };
   }
 });
 
 ipcMain.handle("browser-close", async () => {
   try {
-    if (browserInstance) {
-      await browserInstance.close();
-      browserInstance = null;
-      pageInstance = null;
-    }
+    browserInstance = null;
+    pageInstance = null;
+
     return { success: true };
   } catch (error) {
-    return { success: false, error: error.message };
+    return {
+      success: false,
+      error: error.message,
+    };
   }
 });
 
