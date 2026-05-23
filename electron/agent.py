@@ -1,22 +1,31 @@
 import asyncio
+import os
+from pathlib import Path
+from dotenv import load_dotenv
 from browser_use import Agent, BrowserSession, BrowserProfile
 from langchain_openai import ChatOpenAI
 
+# Load .env from project root (one level above this file)
+load_dotenv(Path(__file__).parent.parent / ".env")
+
 # ============================================================
-#  CONFIG — paste your OpenRouter key here
+#  CONFIG — values loaded from .env
 # ============================================================
-OPENROUTER_API_KEY = "REMOVED_SEE_ENV_FILE"; 
-DEFAULT_MODEL      = "google/gemini-2.5-flash-lite"  # Free model
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+OPENROUTER_URL     = os.environ.get("OPENROUTER_URL", "https://openrouter.ai/api/v1")
+DEFAULT_MODEL      = os.environ.get("DEFAULT_MODEL", "google/gemini-2.5-flash-lite")
+APP_REFERER        = os.environ.get("APP_REFERER", "http://localhost")
+APP_TITLE          = os.environ.get("APP_TITLE", "Jarvis Desktop")
 # ============================================================
 
 def get_llm(model: str = DEFAULT_MODEL):
     return ChatOpenAI(
         model=model,
-        base_url="https://openrouter.ai/api/v1",
+        base_url=OPENROUTER_URL,
         api_key=OPENROUTER_API_KEY,
         default_headers={
-            "HTTP-Referer": "http://localhost",
-            "X-Title": "Jarvis Desktop",
+            "HTTP-Referer": APP_REFERER,
+            "X-Title": APP_TITLE,
         }
     )
 

@@ -1,3 +1,5 @@
+require("dotenv").config({ path: require("path").join(__dirname, "../.env") });
+
 const { app, BrowserWindow, ipcMain, shell, session } = require("electron");
 const path = require("path");
 const fetch = require("node-fetch");
@@ -13,8 +15,15 @@ app.commandLine.appendSwitch(
   "WebSpeechAPI,AudioServiceAudioStreams",
 );
 
-const OPENROUTER_URL = "https://openrouter.ai/api/v1";
-const OPENROUTER_API_KEY = "REMOVED_SEE_ENV_FILE"; // Replace with your actual key
+const OPENROUTER_URL = process.env.OPENROUTER_URL || "https://openrouter.ai/api/v1";
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+const DEFAULT_MODEL = process.env.DEFAULT_MODEL || "google/gemini-2.5-flash-lite";
+const STREAM_MODEL = process.env.STREAM_MODEL || "google/gemma-2-9b-it:free";
+const APP_REFERER = process.env.APP_REFERER || "https://github.com/yashtupkar/Desktop-AI-Assistant";
+const APP_TITLE = process.env.APP_TITLE || "Nova AI Assistant";
+const CHROME_DEBUG_PORT = parseInt(process.env.CHROME_DEBUG_PORT || "9222", 10);
+const TTS_VOICE = process.env.TTS_VOICE || "en-US-AriaNeural";
+const TTS_LANG = process.env.TTS_LANG || "en-US";
 
 let mainWindow;
 
@@ -139,15 +148,15 @@ ipcMain.handle("check-ai-status", async () => {
   }
 });
 
-ipcMain.handle("ai-chat", async (event, messages, model = "google/gemini-2.5-flash-lite") => {
+ipcMain.handle("ai-chat", async (event, messages, model = DEFAULT_MODEL) => {
   try {
     const response = await fetch(`${OPENROUTER_URL}/chat/completions`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
-        "HTTP-Referer": "https://github.com/yashtupkar/Desktop-AI-Assistant",
-        "X-Title": "Nova AI Assistant",
+        "HTTP-Referer": APP_REFERER,
+        "X-Title": APP_TITLE,
       },
       body: JSON.stringify({
         model: model,
@@ -173,15 +182,15 @@ ipcMain.handle("ai-chat", async (event, messages, model = "google/gemini-2.5-fla
 
 ipcMain.on(
   "ai-chat-stream",
-  async (event, messages, model = "google/gemma-2-9b-it:free") => {
+  async (event, messages, model = STREAM_MODEL) => {
     try {
       const response = await fetch(`${OPENROUTER_URL}/chat/completions`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
-          "HTTP-Referer": "https://github.com/yashtupkar/Desktop-AI-Assistant",
-          "X-Title": "Nova AI Assistant",
+          "HTTP-Referer": APP_REFERER,
+          "X-Title": APP_TITLE,
         },
         body: JSON.stringify({
           model: model,
@@ -246,8 +255,8 @@ ipcMain.handle("edge-tts", async (event, text) => {
     const outputFile = path.join(tempDir, `tts-${Date.now()}.mp3`);
 
     const tts = new EdgeTTS({
-      voice: "en-US-AriaNeural",
-      lang: "en-US",
+      voice: TTS_VOICE,
+      lang: TTS_LANG,
     });
 
     await tts.ttsPromise(text, outputFile);
@@ -424,11 +433,11 @@ ipcMain.handle("browser-start", async () => {
 
       // Launch Chrome with debugging using spawn for better process control
       const { spawn } = require("child_process");
-      console.log(`[Browser] Launching Chrome with remote debugging on port 9222...`);
-      console.log(`[Browser] Command: "${chromePath}" --remote-debugging-port=9222 --user-data-dir="${userDataDir}"`);
+      console.log(`[Browser] Launching Chrome with remote debugging on port ${CHROME_DEBUG_PORT}...`);
+      console.log(`[Browser] Command: "${chromePath}" --remote-debugging-port=${CHROME_DEBUG_PORT} --user-data-dir="${userDataDir}"`);
       
       const chromeProcess = spawn(chromePath, [
-        "--remote-debugging-port=9222",
+        `--remote-debugging-port=${CHROME_DEBUG_PORT}`,
         `--user-data-dir=${userDataDir}`,
         "--no-first-run",
         "--no-default-browser-check"
@@ -454,9 +463,9 @@ ipcMain.handle("browser-start", async () => {
       chromeProcess.unref();
 
       // Wait for Chrome debugging port to be ready
-      console.log(`[Browser] Waiting for debugging port 9222 to be available...`);
+      console.log(`[Browser] Waiting for debugging port ${CHROME_DEBUG_PORT} to be available...`);
       try {
-        await waitForPortReady(9222, 60, 500, 2000);
+        await waitForPortReady(CHROME_DEBUG_PORT, 60, 500, 2000);
       } catch (error) {
         if (chromeExited) {
           throw new Error("Chrome process failed to start or exited immediately. Check if Chrome is properly installed.");
@@ -467,7 +476,7 @@ ipcMain.handle("browser-start", async () => {
       // Connect Puppeteer
       console.log(`[Browser] Connecting Puppeteer to Chrome...`);
       browserInstance = await puppeteer.connect({
-        browserURL: "http://127.0.0.1:9222",
+        browserURL: `http://127.0.0.1:${CHROME_DEBUG_PORT}`,
         defaultViewport: null,
       });
       console.log(`[Browser] Puppeteer connected successfully`);
