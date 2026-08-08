@@ -1,5 +1,5 @@
 /** @type {import('tailwindcss').Config} */
-export default {
+module.exports = {
   content: [
     "./index.html",
     "./src/**/*.{js,ts,jsx,tsx}",
@@ -7,10 +7,12 @@ export default {
   theme: {
     extend: {
       colors: {
-        jarvis: {
-          blue: '#00f0ff',
-          dark: '#030a16',
-          panel: 'rgba(3, 10, 22, 0.65)',
+        nova: {
+          primary: '#a855f7',
+          secondary: '#6366f1',
+          accent: '#ec4899',
+          dark: '#0f0a1a',
+          panel: 'rgba(15, 10, 26, 0.75)',
         }
       },
       animation: {

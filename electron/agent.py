@@ -1,12 +1,18 @@
 import asyncio
 import os
+import sys
+import json
 from pathlib import Path
 from dotenv import load_dotenv
 from browser_use import Agent, BrowserSession, BrowserProfile
 from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage, SystemMessage
 
 # Load .env from project root (one level above this file)
 load_dotenv(Path(__file__).parent.parent / ".env")
+
+# Check if running in subprocess mode (TASK environment variable set)
+SUBPROCESS_MODE = os.environ.get("TASK") is not None
 
 # ============================================================
 #  CONFIG — values loaded from .env
@@ -16,18 +22,9 @@ OPENROUTER_URL     = os.environ.get("OPENROUTER_URL", "https://openrouter.ai/api
 DEFAULT_MODEL      = os.environ.get("DEFAULT_MODEL", "google/gemini-2.5-flash-lite")
 APP_REFERER        = os.environ.get("APP_REFERER", "http://localhost")
 APP_TITLE          = os.environ.get("APP_TITLE", "Jarvis Desktop")
+CHROME_USER_DATA_DIR = os.environ.get("CHROME_USER_DATA_DIR")
+CHROME_PROFILE     = os.environ.get("CHROME_PROFILE", "Default")
 # ============================================================
-
-def get_llm(model: str = DEFAULT_MODEL):
-    return ChatOpenAI(
-        model=model,
-        base_url=OPENROUTER_URL,
-        api_key=OPENROUTER_API_KEY,
-        default_headers={
-            "HTTP-Referer": APP_REFERER,
-            "X-Title": APP_TITLE,
-        }
-    )
 
 # --- Shared persistent browser session ---
 _session: BrowserSession | None = None
@@ -36,13 +33,18 @@ async def get_session() -> BrowserSession:
     global _session
     if _session is None:
         print("[Browser] Launching browser session...")
-        _session = BrowserSession(
-            headless=False,
-            extra_chromium_args=[
-                "--start-maximized",
-                "--disable-blink-features=AutomationControlled",
-            ],
-        )
+        
+        # Prepare browser arguments based on .env
+        browser_kwargs = {
+            "headless": False,
+            "keep_alive": True  # Prevents browser from closing when agent finishes
+        }
+        if CHROME_USER_DATA_DIR:
+            browser_kwargs["user_data_dir"] = CHROME_USER_DATA_DIR
+            if CHROME_PROFILE:
+                browser_kwargs["profile_directory"] = CHROME_PROFILE
+                
+        _session = BrowserSession(**browser_kwargs)
         await _session.start()
     return _session
 
@@ -53,15 +55,27 @@ async def close_browser():
         _session = None
         print("[Browser] Closed")
 
+# Create LLM with proper configuration for browser-use
+from browser_use.llm.openrouter.chat import ChatOpenRouter
+
 # ============================================================
 #  CORE — run any task in natural language
 # ============================================================
 async def run_task(task: str, model: str = DEFAULT_MODEL) -> str:
     print(f"\n[Jarvis] Task: {task.strip()[:80]}...")
     session = await get_session()
+    
+    llm = ChatOpenRouter(
+        model=model,
+        base_url=OPENROUTER_URL,
+        api_key=OPENROUTER_API_KEY,
+        temperature=0.7,
+        http_referer=APP_REFERER,
+    )
+    
     agent = Agent(
         task=task,
-        llm=get_llm(model),
+        llm=llm,
         browser_session=session,
     )
     result = await agent.run()
@@ -201,6 +215,123 @@ async def custom_task(instruction: str) -> str:
     return await run_task(instruction)
 
 # ============================================================
+#  SUBPROCESS MODE — for Node.js bridge integration
+# ============================================================
+async def subprocess_main():
+    """Main entry point when called from Node.js bridge"""
+    try:
+        task = os.environ.get("TASK", "")
+        args_json = os.environ.get("ARGS", "{}")
+        
+        if not task:
+            print(json.dumps({"error": "No task provided"}))
+            sys.exit(1)
+        
+        try:
+            args = json.loads(args_json)
+        except json.JSONDecodeError:
+            args = {}
+        
+        print(f"[PythonAgent] Received task: {task[:50]}...")
+        
+        # Map task names to functions
+        task_map = {
+            "youtube_search": youtube_search_and_play,
+            "youtube_play": youtube_play_url,
+            "google_search": google_search,
+            "gmail_read": gmail_read_latest,
+            "gmail_send": gmail_send,
+            "maps_search": maps_search,
+            "maps_directions": maps_directions,
+            "amazon_search": amazon_search,
+            "flipkart_search": flipkart_search,
+            "get_news": get_latest_news,
+            "get_weather": get_weather,
+            "whatsapp_send": whatsapp_send,
+            "linkedin_jobs": linkedin_search_jobs,
+            "fill_form": fill_form,
+            "get_page_info": get_page_info,
+            "scrape_data": scrape_data,
+            "custom": custom_task,
+        }
+        
+        # Determine which function to call
+        task_type = args.get("type", "custom")
+        func = task_map.get(task_type, custom_task)
+        
+        # Prepare arguments
+        if task_type == "youtube_search":
+            result = await func(args.get("query", ""))
+        elif task_type == "youtube_play":
+            result = await func(args.get("url", ""))
+        elif task_type == "google_search":
+            result = await func(args.get("query", ""))
+        elif task_type == "gmail_read":
+            result = await func(args.get("count", 5))
+        elif task_type == "gmail_send":
+            result = await func(
+                args.get("to", ""),
+                args.get("subject", ""),
+                args.get("body", "")
+            )
+        elif task_type == "maps_search":
+            result = await func(args.get("location", ""))
+        elif task_type == "maps_directions":
+            result = await func(
+                args.get("from", ""),
+                args.get("to", ""),
+                args.get("mode", "driving")
+            )
+        elif task_type == "amazon_search":
+            result = await func(args.get("product", ""))
+        elif task_type == "flipkart_search":
+            result = await func(args.get("product", ""))
+        elif task_type == "get_news":
+            result = await func(args.get("topic", "India"))
+        elif task_type == "get_weather":
+            result = await func(args.get("city", ""))
+        elif task_type == "whatsapp_send":
+            result = await func(
+                args.get("contact", ""),
+                args.get("message", "")
+            )
+        elif task_type == "linkedin_jobs":
+            result = await func(
+                args.get("role", ""),
+                args.get("location", "India")
+            )
+        elif task_type == "fill_form":
+            result = await func(
+                args.get("url", ""),
+                args.get("fields", {})
+            )
+        elif task_type == "get_page_info":
+            result = await func(args.get("url", ""))
+        elif task_type == "scrape_data":
+            result = await func(
+                args.get("url", ""),
+                args.get("what_to_extract", "")
+            )
+        else:
+            # Custom task - use the task string directly
+            print(f"[PythonAgent] Running custom task: {task[:100]}...")
+            result = await func(task)
+        
+        # Output result as JSON
+        print(json.dumps({
+            "success": True,
+            "result": str(result),
+            "task_type": task_type
+        }))
+        
+    except Exception as e:
+        print(json.dumps({
+            "success": False,
+            "error": str(e)
+        }))
+        sys.exit(1)
+
+# ============================================================
 #  DEMO — test one task at a time
 # ============================================================
 async def demo():
@@ -208,19 +339,18 @@ async def demo():
     print("  Jarvis Browser Automation")
     print("="*55 + "\n")
 
-    try:
-        # Uncomment ONE task to test:
-        result = await get_weather("Bhopal")
-        # result = await youtube_search_and_play("Arijit Singh songs")
-        # result = await google_search("best restaurants in Bhopal")
-        # result = await get_latest_news("India technology")
-        # result = await amazon_search("wireless earphones under 1000")
-        # result = await custom_task("Go to irctc.co.in and check trains from Bhopal to Mumbai tomorrow")
+    # Uncomment ONE task to test:
+    result = await get_weather("Bhopal")
+    # result = await youtube_search_and_play("Arijit Singh songs")
+    # result = await google_search("best restaurants in Bhopal")
+    # result = await get_latest_news("India technology")
+    # result = await amazon_search("wireless earphones under 1000")
+    # result = await custom_task("Go to irctc.co.in and check trains from Bhopal to Mumbai tomorrow")
 
-        print("\nResult:", result)
-
-    finally:
-        await close_browser()
+    print("\nResult:", result)
 
 if __name__ == "__main__":
-    asyncio.run(demo())
+    if SUBPROCESS_MODE:
+        asyncio.run(subprocess_main())
+    else:
+        asyncio.run(demo())

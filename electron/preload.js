@@ -4,6 +4,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   controlWindow: (command) => ipcRenderer.send("window-control", command),
   getSystemStats: () => ipcRenderer.invoke("get-system-stats"),
   openUrl: (url) => ipcRenderer.invoke("open-url", url),
+  systemCommand: (action) => ipcRenderer.invoke("system-command", action),
   openApp: (appName) => ipcRenderer.invoke("open-app", appName),
   aiChat: (messages, model) =>
     ipcRenderer.invoke("ai-chat", messages, model),
@@ -70,5 +71,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
   browserType: (id, text) => ipcRenderer.invoke("browser-type", id, text),
   browserKeyboard: (key) => ipcRenderer.invoke("browser-keyboard", key),
   browserClose: () => ipcRenderer.invoke("browser-close"),
+  browserAct: (action) => ipcRenderer.invoke("browser-act", action),
   runAutomation: (task, args) => ipcRenderer.invoke("run-automation", task, args),
+  desktopAction: (action) => ipcRenderer.invoke("desktop-action", action),
+  takeScreenshot: () => ipcRenderer.invoke("take-screenshot"),
+  stopAutomation: () => ipcRenderer.invoke("stop-automation"),
 });

@@ -8,5 +8,13 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
+  },
+  optimizeDeps: {
+    exclude: ['@xenova/transformers'],
+  },
+  resolve: {
+    alias: {
+      'onnxruntime-web': 'onnxruntime-web/dist/ort-web.min.js'
+    }
   }
 })
