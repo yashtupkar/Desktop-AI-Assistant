@@ -1,57 +1,82 @@
 import { useState, useEffect, useRef } from "react";
 
-export function useVoiceRecognition(wakeWordActive, onResult, onError) {
-  const recognitionRef = useRef(null);
+export function useVoiceRecognition(wakeWordActive, transcribeAudio, onResult, onError) {
   const [speechError, setSpeechError] = useState(false);
+  const recognitionRef = useRef(null);
   const restartTimeoutRef = useRef(null);
+  const isListeningRef = useRef(false);
+
+  const onResultRef = useRef(onResult);
+  const transcribeAudioRef = useRef(transcribeAudio);
+  const onErrorRef = useRef(onError);
+
+  useEffect(() => {
+    onResultRef.current = onResult;
+    transcribeAudioRef.current = transcribeAudio;
+    onErrorRef.current = onError;
+  }, [onResult, transcribeAudio, onError]);
 
   useEffect(() => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
-      console.warn("Speech Recognition API not supported in this browser/environment.");
+      console.warn("[Voice] Speech Recognition API not supported");
       setSpeechError(true);
       return;
     }
 
     const recognition = new SpeechRecognition();
-    recognition.continuous = true;
+    recognition.continuous = false; // Use one-shot for better reliability
     recognition.interimResults = true;
     recognition.lang = "en-US";
     recognition.maxAlternatives = 1;
 
     recognition.onstart = () => {
-      console.log("[WakeWord] Background speech recognition started");
+      console.log("[Voice] Speech recognition started");
+      isListeningRef.current = true;
       setSpeechError(false);
     };
 
     recognition.onresult = (event) => {
-      console.log("[WakeWord] Speech recognition result received");
-      if (onResult) onResult(event);
+      console.log("[Voice] Speech recognition result received");
+      isListeningRef.current = false;
+      
+      const results = Array.from(event.results).map((result) => [
+        {
+          transcript: result[0]?.transcript || "",
+          isFinal: result.isFinal,
+        },
+      ]);
+      const resultIndex = typeof event.resultIndex === "number" ? event.resultIndex : results.length - 1;
+
+      if (onResultRef.current) {
+        onResultRef.current({ resultIndex, results });
+      }
     };
 
     recognition.onerror = (event) => {
-      console.error("[WakeWord] Speech recognition error:", event.error);
+      console.error("[Voice] Speech recognition error:", event.error);
+      isListeningRef.current = false;
+      
+      // Ignore network errors and just restart
       if (event.error === "network") {
-        console.warn("[WakeWord] Network speech recognition failed. Disabling background continuous ASR loop.");
-        setSpeechError(true);
-        try {
-          recognition.stop();
-        } catch (e) {}
+        console.log("[Voice] Network error - will retry");
+        setSpeechError(false); // Don't set error on network issues
       } else if (event.error === "not-allowed") {
-        console.warn("[WakeWord] Microphone permission denied");
+        console.warn("[Voice] Microphone permission denied");
         setSpeechError(true);
       } else if (event.error === "no-speech") {
-        console.warn("[WakeWord] No speech detected - this is normal in silent environments");
+        console.log("[Voice] No speech detected - will restart");
       } else {
-        console.warn("[WakeWord] Speech recognition error:", event.error);
+        console.warn("[Voice] Speech recognition error:", event.error);
       }
     };
 
     recognition.onend = () => {
-      console.log("[WakeWord] Speech recognition ended. Wake word active:", wakeWordActive);
+      console.log("[Voice] Speech recognition ended. Wake word active:", wakeWordActive);
+      isListeningRef.current = false;
       
-      // Add a small delay before restarting to prevent rapid restart loops
-      if (wakeWordActive && !speechError) {
+      // Always restart if active
+      if (wakeWordActive) {
         if (restartTimeoutRef.current) {
           clearTimeout(restartTimeoutRef.current);
         }
@@ -59,9 +84,9 @@ export function useVoiceRecognition(wakeWordActive, onResult, onError) {
           try {
             recognition.start();
           } catch (err) {
-            console.error("[WakeWord] Failed to restart speech recognition:", err);
+            console.error("[Voice] Failed to restart speech recognition:", err);
           }
-        }, 500);
+        }, 3000); // Even longer delay to prevent rapid restart loops
       }
     };
 
@@ -71,7 +96,7 @@ export function useVoiceRecognition(wakeWordActive, onResult, onError) {
       try {
         recognition.start();
       } catch (err) {
-        console.error("[WakeWord] Initial start failed:", err);
+        console.error("[Voice] Initial start failed:", err);
         setSpeechError(true);
       }
     }
@@ -84,7 +109,7 @@ export function useVoiceRecognition(wakeWordActive, onResult, onError) {
         recognition.abort();
       } catch (err) {}
     };
-  }, [wakeWordActive, onResult, speechError]);
+  }, [wakeWordActive]);
 
-  return { recognitionRef, speechError, setSpeechError };
+  return { vadRef: recognitionRef, speechError, setSpeechError };
 }

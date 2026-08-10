@@ -14,6 +14,7 @@ const {
 const config = require("./config");
 const pythonBridge = require("./python-bridge");
 const { aiChat } = require("./ai-chat");
+const { listenForSpeech, transcribeAudio } = require("./deepgram-stt");
 
 let mainWindow = null;
 let browserInstance = null;
@@ -441,6 +442,29 @@ function registerHandlers(ipcMain) {
   ipcMain.handle("take-screenshot", takeScreenshot);
   ipcMain.handle("run-automation", runAutomation);
   ipcMain.handle("stop-automation", stopAutomation);
+  ipcMain.handle("speech-recognition", speechRecognition);
+  ipcMain.handle("transcribe-audio", async (event, base64Audio) => {
+    try {
+      const buffer = Buffer.from(base64Audio, "base64");
+      return await transcribeAudio(buffer, "audio/webm");
+    } catch (err) {
+      console.error("[STT] Transcribe audio error:", err);
+      return { success: false, error: err.message };
+    }
+  });
+}
+
+// Speech recognition handler using Deepgram
+async function speechRecognition(event, timeout = 5) {
+  try {
+    console.log("[STT] Starting Deepgram speech recognition...");
+    const result = await listenForSpeech(timeout);
+    console.log("[STT] Result:", result);
+    return result;
+  } catch (error) {
+    console.error("[STT] Speech recognition error:", error);
+    return { success: false, error: error.message };
+  }
 }
 
 module.exports = {

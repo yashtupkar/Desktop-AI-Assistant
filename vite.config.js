@@ -10,11 +10,10 @@ export default defineConfig({
     strictPort: true,
   },
   optimizeDeps: {
-    exclude: ['@xenova/transformers'],
+    exclude: ['@huggingface/transformers'],
   },
   resolve: {
     alias: {
-      'onnxruntime-web': 'onnxruntime-web/dist/ort-web.min.js'
     }
   }
 })

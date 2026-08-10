@@ -17,10 +17,12 @@ function createWindow() {
     alwaysOnTop: true,
     hasShadow: true,
     webPreferences: {
-      webSecurity: false,
+      webSecurity: true,
+      allowRunningInsecureContent: false,
       preload: path.join(__dirname, "preload.js"),
       nodeIntegration: false,
       contextIsolation: true,
+      sandbox: false,
     },
   });
 
@@ -29,7 +31,7 @@ function createWindow() {
       responseHeaders: {
         ...details.responseHeaders,
         "Content-Security-Policy": [
-          "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:",
+          "default-src 'self' http://localhost:5173 https://fonts.googleapis.com https://fonts.gstatic.com data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval' http://localhost:5173; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: blob:; connect-src 'self' http://localhost:5173 ws: wss: https:; media-src 'self' blob: data:; worker-src 'self' blob:",
         ],
       },
     });

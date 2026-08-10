@@ -10,4 +10,6 @@ module.exports = {
   CHROME_DEBUG_PORT: parseInt(process.env.CHROME_DEBUG_PORT || "9222", 10),
   TTS_VOICE: process.env.TTS_VOICE || "en-US-AriaNeural",
   TTS_LANG: process.env.TTS_LANG || "en-US",
+  PYTHON_PATH: process.env.PYTHON_PATH || "python",
+  DEEPGRAM_API_KEY: process.env.DEEPGRAM_API_KEY,
 };

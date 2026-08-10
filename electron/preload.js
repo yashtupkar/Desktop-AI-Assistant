@@ -76,4 +76,6 @@ contextBridge.exposeInMainWorld("electronAPI", {
   desktopAction: (action) => ipcRenderer.invoke("desktop-action", action),
   takeScreenshot: () => ipcRenderer.invoke("take-screenshot"),
   stopAutomation: () => ipcRenderer.invoke("stop-automation"),
+  speechRecognition: (timeout) => ipcRenderer.invoke("speech-recognition", timeout),
+  transcribeAudio: (base64Audio) => ipcRenderer.invoke("transcribe-audio", base64Audio),
 });

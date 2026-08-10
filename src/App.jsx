@@ -3,9 +3,11 @@ import { Orb } from "./components/Orb";
 import { ControlPill } from "./components/ControlPill";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { DesktopAgent } from "./automation/DesktopAgent";
-import { useVoiceRecognition } from "./hooks/useVoiceRecognition";
+import { extractActionPlan } from "./automation/commandExecutor.mjs";
+import { usePythonSpeechRecognition } from "./hooks/usePythonSpeechRecognition";
 import { useTTS } from "./hooks/useTTS";
 import { useSpeechTranscription } from "./hooks/useSpeechTranscription";
+import { normalizeVoiceCommand } from "./automation/voiceCommandParser";
 
 const getSystemPrompt = () => `You are Nova, a friendly, helpful, and natural-sounding AI assistant.
 
@@ -92,6 +94,8 @@ export default function App() {
   const [aiModel] = useState("google/gemini-2.5-flash-lite");
   const [assistantState, setAssistantState] = useState("idle");
   const [liveTranscript, setLiveTranscript] = useState("");
+  const [transcriptionStatus, setTranscriptionStatus] = useState("loading");
+  const [transcriptionDebug, setTranscriptionDebug] = useState("Waiting for voice...");
   const assistantStateRef = useRef("idle");
   const processMessageRef = useRef(null);
   
@@ -101,9 +105,9 @@ export default function App() {
 
   // Desktop Agent Hook
   const desktopAgentRef = useRef(null);
-  const [wakeWordActive, setWakeWordActive] = useState(false); // Disabled by default due to speech recognition issues
-  const [showKeyboard, setShowKeyboard] = useState(true); // Show keyboard by default for testing
+  const [showKeyboard, setShowKeyboard] = useState(false);
   const [typedCommand, setTypedCommand] = useState("");
+  const autoListenEnabledRef = useRef(true);
   const [confirmDialog, setConfirmDialog] = useState({
     isOpen: false,
     title: "",
@@ -111,68 +115,31 @@ export default function App() {
     onConfirm: null,
   });
   const [actionLog, setActionLog] = useState([]);
-  const wakeWordActiveRef = useRef(true);
-
-  // Wake word result handler
-  const handleWakeWordResult = (event) => {
+  const handleVoiceCommandResult = (event) => {
     const currentStatus = assistantStateRef.current;
-    
     const resultIndex = event.resultIndex;
     const latestResult = event.results[resultIndex];
     if (!latestResult) return;
 
-    const transcript = latestResult[0].transcript.trim().toLowerCase();
+    const rawTranscript = latestResult[0].transcript;
+    const transcript = rawTranscript.trim();
     const isFinal = latestResult.isFinal;
 
-    console.log(`[WakeWord] Hearing (${isFinal ? "final" : "interim"}): "${transcript}"`);
+    console.log(`[Voice] Hearing (${isFinal ? "final" : "interim"}): "${transcript}"`);
+    setTranscriptionDebug(transcript || "Listening for speech...");
 
-    // 1. WAKE WORD MODE: Assistant is idle and wakeWordActive is enabled
-    if (currentStatus === "idle" && wakeWordActiveRef.current) {
-      if (transcript.includes("nova")) {
-        const novaIndex = transcript.indexOf("nova");
-        const afterNova = latestResult[0].transcript.slice(novaIndex + 4).trim();
-
-        if (afterNova.length > 3 && isFinal) {
-          console.log(`[WakeWord] Direct command captured: "${afterNova}"`);
-          if (processMessageRef.current) processMessageRef.current(afterNova);
-        } else if (!isFinal && afterNova.length > 3) {
-          setLiveTranscript(`"Nova, ${afterNova}"`);
-        } else if (isFinal && afterNova.length <= 3) {
-          updateAssistantState("thinking");
-          speak("Yes, Sir?");
-          
-          setTimeout(() => {
-            updateAssistantState("listening");
-            setLiveTranscript("I'm listening, Sir...");
-          }, 1000);
-        }
-      }
-    } 
-    // 2. ACTIVE COMMAND CAPTURING: Assistant is already in 'listening' state
-    else if (currentStatus === "listening") {
+    if (currentStatus === "listening") {
       if (isFinal) {
-        if (transcript.length > 0) {
-          let finalCommand = transcript;
-          if (finalCommand.startsWith("nova ")) {
-            finalCommand = finalCommand.substring(5).trim();
-          }
-          if (finalCommand.startsWith("nova, ")) {
-            finalCommand = finalCommand.substring(6).trim();
-          }
-          
-          if (finalCommand.length > 0) {
-            setLiveTranscript(latestResult[0].transcript);
-            if (processMessageRef.current) processMessageRef.current(finalCommand);
-          } else {
-            updateAssistantState("idle");
-            setLiveTranscript("");
-          }
+        const command = normalizeVoiceCommand(transcript);
+        if (command.length > 0) {
+          setLiveTranscript(command);
+          if (processMessageRef.current) processMessageRef.current(command);
         } else {
           updateAssistantState("idle");
           setLiveTranscript("");
         }
-      } else {
-        setLiveTranscript(latestResult[0].transcript);
+      } else if (transcript.length > 0) {
+        setLiveTranscript(transcript);
       }
     }
   };
@@ -190,9 +157,13 @@ export default function App() {
     }
   });
   const { transcriberLoaded, transcribeAudio } = useSpeechTranscription();
-  const { recognitionRef, speechError, setSpeechError } = useVoiceRecognition(
-    wakeWordActive,
-    handleWakeWordResult
+
+  useEffect(() => {
+    setTranscriptionStatus(transcriberLoaded ? "ready" : "loading");
+  }, [transcriberLoaded]);
+  const { speechError, isListening } = usePythonSpeechRecognition(
+    true,
+    handleVoiceCommandResult
   );
 
   useEffect(() => {
@@ -223,6 +194,18 @@ export default function App() {
     );
   }, []);
 
+  useEffect(() => {
+    if (assistantState !== "idle" || !autoListenEnabledRef.current) {
+      return;
+    }
+
+    // Voice recognition is automatic with the hook, just update state
+    if (assistantStateRef.current !== "listening") {
+      updateAssistantState("listening");
+      setLiveTranscript("Listening for your command...");
+    }
+  }, [assistantState]);
+
   const updateAssistantState = (newState) => {
     setAssistantState(newState);
     assistantStateRef.current = newState;
@@ -245,46 +228,16 @@ export default function App() {
   }, []);
 
   const startListening = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } 
-      });
-      streamRef.current = stream;
-      
-      const mediaRecorder = new MediaRecorder(stream);
-      mediaRecorderRef.current = mediaRecorder;
-      audioChunksRef.current = [];
-
-      mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) audioChunksRef.current.push(event.data);
-      };
-
-      mediaRecorder.onstop = async () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-        const text = await transcribeAudio(audioBlob);
-        if (text && text.length > 0) {
-          if (processMessageRef.current) processMessageRef.current(text);
-        } else {
-          updateAssistantState('idle');
-        }
-      };
-
-      mediaRecorder.start();
-      updateAssistantState('listening');
-      setLiveTranscript("Listening...");
-    } catch (err) {
-      setLiveTranscript("Error: " + err.message);
-    }
+    // Voice recognition is handled by the hook, just update state
+    updateAssistantState('listening');
+    setLiveTranscript("Listening...");
+    setTranscriptionDebug("Microphone active. Speak now...");
   };
 
   const stopListening = async () => {
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-      mediaRecorderRef.current.stop();
-    }
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => track.stop());
-      streamRef.current = null;
-    }
+    // Voice recognition stops automatically when wakeWordActive is false
+    updateAssistantState('idle');
+    setLiveTranscript("");
   };
 
   const runPythonBrowserAgent = async (taskDescription, args = {}) => {
@@ -357,58 +310,70 @@ export default function App() {
             }));
           };
 
-          const allTasks = [
-            ...extractAll(/<OPEN_URL>(.*?)<\/OPEN_URL>/gs, "OPEN_URL"),
-            ...extractAll(/<OPEN_APP>(.*?)<\/OPEN_APP>/gs, "OPEN_APP"),
-            ...extractAll(/<SYSTEM_COMMAND>(.*?)<\/SYSTEM_COMMAND>/gs, "SYSTEM_COMMAND"),
-            ...extractAll(/<DESKTOP_TASK>(.*?)<\/DESKTOP_TASK>/gs, "DESKTOP"),
-            ...extractAll(/<PYTHON_BROWSER_TASK>(.*?)<\/PYTHON_BROWSER_TASK>/gs, "PYTHON_BROWSER"),
-            ...extractAll(/<BROWSER_TASK>(.*?)<\/BROWSER_TASK>/gs, "BROWSER")
-          ].sort((a, b) => a.index - b.index);
+          const allTasks = extractActionPlan(fullResponse);
 
           if (allTasks.length > 0) {
             updateAssistantState("automating");
-            
-            for (const task of allTasks) {
-              if (task.type === "OPEN_URL") {
-                try {
+
+            const runTaskWithRetry = async (task, attempt = 0) => {
+              const tryOnce = async () => {
+                if (task.type === "OPEN_URL") {
                   await window.electronAPI.openUrl(task.value);
                   setLiveTranscript(`Opened ${task.value}`);
-                  // Wait 3 seconds for the browser to open and load before the next step
-                  await new Promise(r => setTimeout(r, 3000));
-                } catch (err) {
-                  setLiveTranscript("Error opening URL.");
+                  await new Promise((resolve) => setTimeout(resolve, 3000));
+                  return true;
                 }
-              } else if (task.type === "OPEN_APP") {
-                try {
+
+                if (task.type === "OPEN_APP") {
                   const res = await window.electronAPI.openApp(task.value);
                   if (res.success) {
                     setLiveTranscript(`Opened ${task.value}`);
-                    await new Promise(r => setTimeout(r, 2000)); // Wait for app to open
-                  } else {
-                    speak(`Sorry, I couldn't open ${task.value}. ${res.message}`);
+                    await new Promise((resolve) => setTimeout(resolve, 2000));
+                    return true;
                   }
-                } catch (err) {
-                  setLiveTranscript("Error opening app.");
+                  throw new Error(res.message || "Could not open app");
                 }
-              } else if (task.type === "SYSTEM_COMMAND") {
-                try {
+
+                if (task.type === "SYSTEM_COMMAND") {
                   const res = await window.electronAPI.systemCommand(task.value);
                   if (res.success) {
                     setLiveTranscript(`System command: ${task.value}`);
-                  } else {
-                    speak(`Sorry, I couldn't execute that system command.`);
+                    return true;
                   }
-                } catch (err) {
-                  setLiveTranscript("Error executing system command.");
+                  throw new Error(res.error || "System command failed");
                 }
-              } else if (task.type === "PYTHON_BROWSER") {
-                await runPythonBrowserAgent(task.value);
-              } else if (task.type === "DESKTOP") {
-                if (desktopAgentRef.current) {
-                  await desktopAgentRef.current.start(task.value);
+
+                if (task.type === "PYTHON_BROWSER") {
+                  await runPythonBrowserAgent(task.value);
+                  return true;
                 }
+
+                if (task.type === "DESKTOP") {
+                  if (desktopAgentRef.current) {
+                    await desktopAgentRef.current.start(task.value);
+                    return true;
+                  }
+                  throw new Error("Desktop automation is unavailable");
+                }
+
+                return true;
+              };
+
+              try {
+                return await tryOnce();
+              } catch (error) {
+                if (attempt < 1) {
+                  logAction(`Retrying task: ${task.type}`);
+                  return runTaskWithRetry(task, attempt + 1);
+                }
+                console.error("[Automation] Task failed", error);
+                setLiveTranscript(`Task failed: ${error.message || "Unknown error"}`);
+                return false;
               }
+            };
+            
+            for (const task of allTasks) {
+              await runTaskWithRetry(task);
             }
             updateAssistantState("idle");
           } else if (fullResponse.trim()) {
@@ -443,32 +408,28 @@ export default function App() {
 
   const toggleListening = () => {
     if (assistantState === "listening") {
+      autoListenEnabledRef.current = false;
       updateAssistantState("idle");
       setLiveTranscript("");
-      stopListening();
     } else if (assistantState === "automating") {
-       if (desktopAgentRef.current) desktopAgentRef.current.stop();
-       updateAssistantState("idle");
+      autoListenEnabledRef.current = false;
+      if (desktopAgentRef.current) desktopAgentRef.current.stop();
+      updateAssistantState("idle");
     } else {
-       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-       if (SpeechRecognition && !speechError) {
-         updateAssistantState("listening");
-         setLiveTranscript("I'm listening, Sir...");
-         try {
-           recognitionRef.current?.start();
-         } catch (e) {}
-       } else {
-         startListening();
-       }
+      autoListenEnabledRef.current = true;
+      updateAssistantState("listening");
+      setLiveTranscript("Listening for your command...");
     }
   };
 
-  let statusText = transcriberLoaded ? "Awaiting your command..." : "Loading model...";
+  let statusText = "Awaiting your command...";
 
   if (assistantState === "listening") {
-    statusText = liveTranscript
+    statusText = isListening
+      ? "Listening via Deepgram STT..."
+      : liveTranscript
       ? `"${liveTranscript}"`
-      : "I'm listening, Sir...\nClick again when done";
+      : "Listening for your command...";
   } else if (assistantState === "thinking") {
     statusText = "Processing...";
   } else if (assistantState === "speaking") {
@@ -492,23 +453,16 @@ export default function App() {
         onCancel={() => setConfirmDialog({ isOpen: false, title: "", message: "", onConfirm: null })}
       />
 
-      {/* Wake Word Status Indicator */}
+      {/* Voice status indicator */}
       <div className="absolute top-4 right-4 no-drag-region flex items-center space-x-2 bg-white/5 border border-white/10 rounded-full px-3 py-1 text-xs text-white/60 hover:text-white hover:bg-white/10 cursor-pointer transition-all duration-300"
            onClick={() => {
-             const newVal = !wakeWordActive;
-             setWakeWordActive(newVal);
-             wakeWordActiveRef.current = newVal;
              setSpeechError(false);
-             if (newVal) {
-               try {
-                 recognitionRef.current?.start();
-               } catch(e) {}
-             } else {
-               recognitionRef.current?.stop();
-             }
+             try {
+               recognitionRef.current?.start();
+             } catch(e) {}
            }}>
-        <div className={`w-2 h-2 rounded-full ${speechError ? "bg-amber-500 animate-pulse" : (wakeWordActive ? "bg-green-400 animate-pulse" : "bg-red-400")}`}></div>
-        <span>Wake Word "Nova": {speechError ? "Offline" : (wakeWordActive ? "Active" : "OFF")}</span>
+        <div className={`w-2 h-2 rounded-full ${speechError ? "bg-amber-500 animate-pulse" : "bg-green-400 animate-pulse"}`}></div>
+        <span>Voice Command Mode: {speechError ? "Offline" : "Listening"}</span>
       </div>
 
       <Orb assistantState={assistantState} onClick={toggleListening} />
@@ -517,6 +471,13 @@ export default function App() {
         <h2 className="text-white text-lg font-medium tracking-wide whitespace-pre-line leading-relaxed text-glow">
           {statusText}
         </h2>
+      </div>
+
+      <div className="w-[92%] max-w-md mt-3 rounded-2xl border border-white/10 bg-black/35 backdrop-blur-md px-4 py-3 text-left no-drag-region">
+        <div className="text-[10px] uppercase tracking-[0.3em] text-white/40 mb-1">Live transcription</div>
+        <div className="text-sm text-white/90 whitespace-pre-wrap break-words min-h-[2.2rem]">
+          {transcriptionDebug}
+        </div>
       </div>
 
       {/* Keyboard Input Field */}
