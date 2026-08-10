@@ -51,16 +51,22 @@ export function usePythonSpeechRecognition(wakeWordActive, onResult, onError) {
               reader.onloadend = async () => {
                 const base64data = reader.result.split(',')[1];
                 const result = await window.electronAPI.transcribeAudio(base64data);
+                console.log("[JS STT] Transcribe result:", result);
                 
                 if (isMounted && result.success && result.text) {
+                  console.log("[JS STT] Calling onResultRef...");
                   if (onResultRef.current) {
                     onResultRef.current({ 
                       resultIndex: 0, 
                       results: [[{ transcript: result.text, isFinal: true }]] 
                     });
+                  } else {
+                    console.error("[JS STT] onResultRef.current is null!");
                   }
                 } else if (isMounted && result.error) {
                     console.log("[JS STT] Deepgram error:", result.error);
+                } else if (!isMounted) {
+                    console.log("[JS STT] Component unmounted, skipping result");
                 }
               };
             } catch (err) {
@@ -74,14 +80,60 @@ export function usePythonSpeechRecognition(wakeWordActive, onResult, onError) {
           }
         };
         
-        mediaRecorder.start();
+        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        const source = audioContext.createMediaStreamSource(stream);
+        const analyser = audioContext.createAnalyser();
+        analyser.fftSize = 512;
+        source.connect(analyser);
+
+        const bufferLength = analyser.frequencyBinCount;
+        const dataArray = new Uint8Array(bufferLength);
         
-        // Stop recording after 4 seconds to process chunks
-        setTimeout(() => {
+        let silenceTimer = null;
+        let maxTimer = null;
+
+        const checkSilence = () => {
+          if (!isMounted || mediaRecorder.state !== 'recording') return;
+          
+          analyser.getByteTimeDomainData(dataArray);
+          let isSilent = true;
+          for (let i = 0; i < bufferLength; i++) {
+            const amplitude = Math.abs(dataArray[i] - 128);
+            if (amplitude > 5) { // Threshold for silence
+              isSilent = false;
+              break;
+            }
+          }
+
+          if (isSilent) {
+            if (!silenceTimer) {
+              silenceTimer = setTimeout(() => {
+                if (mediaRecorder.state === 'recording') {
+                  mediaRecorder.stop();
+                }
+              }, 1500); // 1.5 seconds of silence
+            }
+          } else {
+            if (silenceTimer) {
+              clearTimeout(silenceTimer);
+              silenceTimer = null;
+            }
+          }
+          
+          if (mediaRecorder.state === 'recording') {
+            requestAnimationFrame(checkSilence);
+          }
+        };
+
+        mediaRecorder.start();
+        checkSilence();
+
+        // Max recording time 15 seconds to prevent memory issues
+        maxTimer = setTimeout(() => {
           if (mediaRecorder.state === 'recording') {
             mediaRecorder.stop();
           }
-        }, 4000);
+        }, 15000);
         
       } catch (err) {
         console.error("[JS STT] Mic Error:", err);

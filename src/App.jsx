@@ -123,7 +123,7 @@ export default function App() {
 
     const rawTranscript = latestResult[0].transcript;
     const transcript = rawTranscript.trim();
-    const isFinal = latestResult.isFinal;
+    const isFinal = latestResult.isFinal !== undefined ? latestResult.isFinal : latestResult[0].isFinal;
 
     console.log(`[Voice] Hearing (${isFinal ? "final" : "interim"}): "${transcript}"`);
     setTranscriptionDebug(transcript || "Listening for speech...");
@@ -289,114 +289,134 @@ export default function App() {
       ];
 
       let fullResponse = "";
+      let processedLength = 0;
       let assistantMessageId = Date.now();
+      
+      const executedTaskIndexes = new Set();
+      
+      const runTaskWithRetry = async (task, attempt = 0) => {
+        const tryOnce = async () => {
+          if (task.type === "OPEN_URL") {
+            await window.electronAPI.openUrl(task.value);
+            setLiveTranscript(`Opened ${task.value}`);
+            await new Promise((resolve) => setTimeout(resolve, 3000));
+            return true;
+          }
+
+          if (task.type === "OPEN_APP") {
+            const res = await window.electronAPI.openApp(task.value);
+            if (res.success) {
+              setLiveTranscript(`Opened ${task.value}`);
+              await new Promise((resolve) => setTimeout(resolve, 2000));
+              return true;
+            }
+            throw new Error(res.message || "Could not open app");
+          }
+
+          if (task.type === "SYSTEM_COMMAND") {
+            const res = await window.electronAPI.systemCommand(task.value);
+            if (res.success) {
+              setLiveTranscript(`System command: ${task.value}`);
+              return true;
+            }
+            throw new Error(res.error || "System command failed");
+          }
+
+          if (task.type === "PYTHON_BROWSER") {
+            await runPythonBrowserAgent(task.value);
+            return true;
+          }
+
+          if (task.type === "DESKTOP") {
+            if (desktopAgentRef.current) {
+              await desktopAgentRef.current.start(task.value);
+              return true;
+            }
+            throw new Error("Desktop automation is unavailable");
+          }
+
+          return true;
+        };
+
+        try {
+          return await tryOnce();
+        } catch (error) {
+          if (attempt < 1) {
+            logAction(`Retrying task: ${task.type}`);
+            return runTaskWithRetry(task, attempt + 1);
+          }
+          console.error("[Automation] Task failed", error);
+          setLiveTranscript(`Task failed: ${error.message || "Unknown error"}`);
+          return false;
+        }
+      };
+
+      const checkForNewTasks = async () => {
+        const allTasks = extractActionPlan(fullResponse);
+        for (let i = 0; i < allTasks.length; i++) {
+          const task = allTasks[i];
+          if (!executedTaskIndexes.has(task.index)) {
+            executedTaskIndexes.add(task.index);
+            updateAssistantState("automating");
+            await runTaskWithRetry(task);
+            updateAssistantState("idle");
+          }
+        }
+      };
 
       setMessages((prev) => [
         ...prev,
         { role: "assistant", content: "", id: assistantMessageId },
       ]);
 
-      window.electronAPI.aiChatStream(aiMessages, aiModel, {
-        onChunk: (chunk) => {
-          fullResponse += chunk;
-        },
-        onDone: async () => {
-          // Extract all tasks and sort them by their appearance order in the response
-          const extractAll = (regex, type) => {
-            return Array.from(fullResponse.matchAll(regex)).map(m => ({
-              type,
-              value: m[1].trim(),
-              index: m.index
-            }));
-          };
-
-          const allTasks = extractActionPlan(fullResponse);
-
-          if (allTasks.length > 0) {
-            updateAssistantState("automating");
-
-            const runTaskWithRetry = async (task, attempt = 0) => {
-              const tryOnce = async () => {
-                if (task.type === "OPEN_URL") {
-                  await window.electronAPI.openUrl(task.value);
-                  setLiveTranscript(`Opened ${task.value}`);
-                  await new Promise((resolve) => setTimeout(resolve, 3000));
-                  return true;
-                }
-
-                if (task.type === "OPEN_APP") {
-                  const res = await window.electronAPI.openApp(task.value);
-                  if (res.success) {
-                    setLiveTranscript(`Opened ${task.value}`);
-                    await new Promise((resolve) => setTimeout(resolve, 2000));
-                    return true;
-                  }
-                  throw new Error(res.message || "Could not open app");
-                }
-
-                if (task.type === "SYSTEM_COMMAND") {
-                  const res = await window.electronAPI.systemCommand(task.value);
-                  if (res.success) {
-                    setLiveTranscript(`System command: ${task.value}`);
-                    return true;
-                  }
-                  throw new Error(res.error || "System command failed");
-                }
-
-                if (task.type === "PYTHON_BROWSER") {
-                  await runPythonBrowserAgent(task.value);
-                  return true;
-                }
-
-                if (task.type === "DESKTOP") {
-                  if (desktopAgentRef.current) {
-                    await desktopAgentRef.current.start(task.value);
-                    return true;
-                  }
-                  throw new Error("Desktop automation is unavailable");
-                }
-
-                return true;
-              };
-
-              try {
-                return await tryOnce();
-              } catch (error) {
-                if (attempt < 1) {
-                  logAction(`Retrying task: ${task.type}`);
-                  return runTaskWithRetry(task, attempt + 1);
-                }
-                console.error("[Automation] Task failed", error);
-                setLiveTranscript(`Task failed: ${error.message || "Unknown error"}`);
-                return false;
+      const processLLMStream = async (retryCount = 0) => {
+        return new Promise((resolve, reject) => {
+          const cleanup = window.electronAPI.aiChatStream(aiMessages, aiModel, {
+            onChunk: async (chunk) => {
+              fullResponse += chunk;
+              
+              setMessages((prev) =>
+                prev.map((msg) =>
+                  msg.id === assistantMessageId ? { ...msg, content: fullResponse } : msg
+                )
+              );
+              
+              await checkForNewTasks();
+            },
+            onDone: async () => {
+              await checkForNewTasks();
+              
+              const cleanText = fullResponse.replace(/<[^>]+>.*?<\/[^>]+>/gs, '').trim();
+              if (cleanText) {
+                speak(cleanText);
+                setLiveTranscript(cleanText);
+              } else if (executedTaskIndexes.size === 0) {
+                 updateAssistantState("idle");
               }
-            };
-            
-            for (const task of allTasks) {
-              await runTaskWithRetry(task);
-            }
-            updateAssistantState("idle");
-          } else if (fullResponse.trim()) {
-            speak(fullResponse);
-            setLiveTranscript(fullResponse);
-          } else {
-            updateAssistantState("idle");
-          }
-
-          // Save the assistant's response to the message history so it remembers its past actions
-          setMessages((prev) =>
-            prev.map((msg) =>
-              msg.id === assistantMessageId ? { ...msg, content: fullResponse } : msg
-            )
-          );
-        },
-        onError: (error) => {
-          console.error("[AI] Stream error:", error);
+              resolve(true);
+            },
+            onError: (error) => {
+              reject(error);
+            },
+          });
+        });
+      };
+      
+      try {
+        await processLLMStream();
+      } catch (err) {
+        console.error("[AI] Stream error:", err);
+        // Retry logic
+        logAction("Retrying LLM request...");
+        try {
+          await processLLMStream();
+        } catch (retryErr) {
           speak("Sorry, I encountered an error processing your request, Sir.");
           setLiveTranscript("Error occurred. Please try again.");
           updateAssistantState("idle");
-        },
-      });
+        }
+      }
+
     } catch (error) {
       console.error("[AI] Process error:", error);
       speak("Sorry, I encountered an error, Sir.");
